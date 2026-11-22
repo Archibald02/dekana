@@ -155,3 +155,47 @@ test('Демопроходы изолированы, а конфликт и ут
   const fresh=await demo();
   assert.deepEqual((await home(fresh)).applications,[]);
 });
+
+test('Деканат предлагает свободное время, а студент подтверждает замену только для своего расписания',async t=>{
+  const db=localDB();
+  t.after(()=>db.close());
+  const call=(...args)=>server(db,...args);
+  const session=async ()=>{
+    const result=await call('/api/demo/start',{body:{}});
+    assert.equal(result.status,200);
+    return result.headers.get('set-cookie').split(';')[0];
+  };
+  const one=await session(), two=await session();
+  const home=async cookie=>await (await call('/api/home',{cookie})).json();
+  const role=async (cookie,name)=>assert.equal((await call('/api/demo/switch',{cookie,body:{role:name}})).status,200);
+  const [conflict]=(await home(one)).conflicts;
+  const draft={type:'request',note:'Прошу предложить другое время.',conflictEvent:conflict.event};
+  const created=await call('/api/applications',{cookie:one,body:draft});
+  assert.equal(created.status,201);
+  const id=(await created.json()).id;
+  const duplicate=await call('/api/applications',{cookie:one,body:draft});
+  assert.equal(duplicate.status,200);
+  assert.equal((await duplicate.json()).id,id);
+  const record='/api/applications/'+id;
+  const route='/api/staff/applications/'+id;
+  await role(one,'staff.demo');
+  const started=await call(route,{cookie:one,body:{action:'start'}});
+  const [option]=(await started.json()).options;
+  assert.ok(option);
+  assert.equal((await call(route,{cookie:one,body:{action:'offer',start:conflict.other.start}})).status,409);
+  assert.equal((await call(route,{cookie:one,body:{action:'offer',start:option.start}})).status,200);
+  assert.equal((await call(route,{cookie:one,body:{action:'complete',reply:'Одностороннее завершение'}})).status,409);
+  await role(one,'student.vega');
+  assert.equal((await call(record,{cookie:one,body:{action:'accept'}})).status,404);
+  await role(one,'student.nord');
+  assert.equal((await home(one)).conflicts.length,1);
+  assert.equal((await call(record,{cookie:one,body:{action:'accept'}})).status,200);
+  assert.equal((await call(record,{cookie:one,body:{action:'accept'}})).status,200);
+  const final=await home(one);
+  assert.deepEqual(final.conflicts,[]);
+  assert.equal(final.schedule.find(day=>day.day===conflict.day).lessons.find(item=>item.key===conflict.moved.key).start,option.start);
+  const result=await (await call(record,{cookie:one})).json();
+  assert.equal(result.status,'Замена подтверждена');
+  assert.ok(result.offer.accepted);
+  assert.equal((await home(two)).conflicts.length,1);
+});

@@ -44,7 +44,7 @@ function login(message='') {
   data = null;
   day = null;
   detail = null;
-  app.innerHTML = '<main class="login"><section class="login-art">'+brand+'<div class="orbit"></div><div class="login-copy"><span class="eyebrow">СТУДЕНЧЕСКИЙ КАБИНЕТ</span><h1>Всё по&nbsp;учёбе.<br>В одном месте.</h1><p>Пары, оценки, заявки и новости деканата под рукой.</p></div><p class="login-caption">Конкурсный концепт · Вымышленные данные</p></section><section class="login-area"><div class="login-card"><span class="eyebrow">ЛИЧНЫЙ КАБИНЕТ</span><h2>Войти в Декану</h2><p class="muted">Введите данные тестового аккаунта.</p><form id="login-form"><label for="login">Логин</label><input id="login" name="login" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="80" placeholder="student.nord" required><label for="password">Пароль</label><input id="password" name="password" autocomplete="current-password" type="password" maxlength="128" placeholder="Введите пароль" required><p class="error" role="alert">'+escapeText(message)+'</p><button class="button primary" type="submit">Войти</button></form><button class="button secondary demo-login" data-action="demo-start">Открыть режим жюри</button><p class="login-legal">Конкурсный прототип цифрового деканата. Используются вымышленные данные.</p></div></section></main>';
+  app.innerHTML = '<main class="login"><section class="login-art">'+brand+'<div class="orbit"></div><div class="login-copy"><span class="eyebrow">СТУДЕНЧЕСКИЙ КАБИНЕТ</span><h1>Всё по&nbsp;учёбе.<br>В одном месте.</h1><p>Пары, оценки, заявки и новости деканата под рукой.</p></div><p class="login-caption">Конкурсный концепт · Вымышленные данные</p></section><section class="login-area"><div class="login-card"><span class="eyebrow">ЛИЧНЫЙ КАБИНЕТ</span><h2>Войти в Декану</h2><p class="muted">Введите данные тестового аккаунта.</p><form id="login-form"><label for="login">Логин</label><input id="login" name="login" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="80" placeholder="student.nord" required><label for="password">Пароль</label><input id="password" name="password" autocomplete="current-password" type="password" maxlength="128" placeholder="Введите пароль" required><p class="error" role="alert">'+escapeText(message)+'</p><button class="button primary" type="submit">Войти</button></form><button class="button secondary demo-login" data-action="demo-start">Открыть режим жюри</button><button class="button secondary demo-login" data-action="tour-start">Автопоказ для жюри · 1 минута</button><p class="login-legal">Конкурсный прототип цифрового деканата. Используются вымышленные данные.</p></div></section></main>';
   app.querySelector('form').addEventListener('submit',async event=>{
     event.preventDefault();
     const form=event.currentTarget, button=form.querySelector('button'), values=new FormData(form);
@@ -68,17 +68,18 @@ function pageHeading(title,copy,action='') {
 const scheduleLink = '<a class="text-link" href="#schedule">Всё расписание</a>';
 const newRequest = '<button class="button primary" data-action="new">'+icon('plus')+'Новая заявка</button>';
 function lessonRows(lessons, selectedTime) {
-  return lessons.length ? '<ul class="lessons">'+lessons.map(item=>'<li id="lesson-'+item.key.replace(':','')+'" class="lesson'+(selectedTime===item.key?' spotlight':'')+'" tabindex="-1"><div class="lesson-time"><strong>'+item.start+'</strong><small>'+item.end+'</small></div><div class="lesson-main"><strong>'+escapeText(item.name)+'</strong><small>'+escapeText(item.form)+' · '+escapeText(item.teacher)+'</small>'+(item.change ? '<span class="chip warn">'+escapeText(item.key===item.start?item.change+' → '+item.room:item.key+' → '+item.start)+'</span>':'')+'</div><button class="room map-link" data-action="map" data-room="'+escapeText(item.room)+'" aria-label="Схема, аудитория '+escapeText(item.room)+'">'+escapeText(item.room)+'</button></li>').join('')+'</ul>' : '<div class="empty"><span class="empty-icon">'+icon('schedule')+'</span><strong>Пар по расписанию нет</strong><p>Выберите другой день или посмотрите планы на неделю.</p></div>';
+  return lessons.length ? '<ul class="lessons">'+lessons.map(item=>'<li id="lesson-'+item.key.replace(':','')+'" class="lesson'+(selectedTime===item.key?' spotlight':'')+'" tabindex="-1"><div class="lesson-time"><strong>'+item.start+'</strong><small>'+item.end+'</small></div><div class="lesson-main"><strong>'+escapeText(item.name)+'</strong><small>'+escapeText(item.form)+' · '+escapeText(item.teacher)+'</small>'+(item.resolved?'<span class="chip good">Замена подтверждена</span>':item.change?'<span class="chip warn">'+escapeText(item.key===item.start?item.change+' → '+item.room:item.key+' → '+item.start)+'</span>':'')+'</div><button class="room map-link" data-action="map" data-room="'+escapeText(item.room)+'" aria-label="Схема, аудитория '+escapeText(item.room)+'">'+escapeText(item.room)+'</button></li>').join('')+'</ul>' : '<div class="empty"><span class="empty-icon">'+icon('schedule')+'</span><strong>Пар по расписанию нет</strong><p>Выберите другой день или посмотрите планы на неделю.</p></div>';
 }
 function conflictPanel(onlyDay) {
   const [conflict]=onlyDay?data.conflicts.filter(event=>event.day===onlyDay):data.conflicts;
   if(!conflict) return '';
   const {moved,other,day:conflictDay}=conflict;
+  const existing=data.applications.find(record=>record.open && record.conflictEvent===conflict.event);
   return '<section class="panel conflict" aria-labelledby="conflict-title"><span class="chip warn">Конфликт расписания</span>'+
     '<h2 id="conflict-title">'+escapeText(moved.name)+' пересекается с другим занятием</h2>'+
     '<p>'+date(conflictDay)+' · '+escapeText(moved.name)+' '+moved.start+'–'+moved.end+' · '+escapeText(other.name)+' '+other.start+'–'+other.end+'</p>'+
     '<div class="toolbar"><a class="button secondary" href="#schedule/'+conflictDay+'/'+moved.key+'">Посмотреть занятие</a>'+
-    '<button class="button primary" data-action="conflict">Сообщить деканату</button></div></section>';
+    (existing?'<a class="button primary" href="#requests/'+existing.id+'">Открыть обращение</a>':'<button class="button primary" data-action="conflict">Сообщить деканату</button>')+'</div></section>';
 }
 const upcomingSteps = () => data.grades.flatMap(g=>g.steps.map(step=>({...step,subject:g.name,grade:g.id})))
   .filter(step=>!data.checks.includes(step.id)).sort((a,b)=>a.date.localeCompare(b.date));
@@ -101,7 +102,7 @@ function juryBar(staffMode) {
   const roles=[['student.nord','Лея'],['staff.demo','Деканат'],['student.vega','Марк']];
   return '<section class="jury-bar" aria-label="Демо для жюри"><div><strong>Демо для жюри</strong><small>Лея: конфликт и обращение · Деканат: уточнение · Лея: ответ · Марк: отдельный кабинет</small></div><div class="toolbar">'+
     roles.map(([role,label])=>'<button class="button '+(role===active?'primary':'secondary')+'" data-action="demo-role" data-role="'+role+'" aria-pressed="'+(role===active)+'" '+(role===active?'disabled':'')+'>'+label+'</button>').join('')+
-    '<button class="button secondary" data-action="demo-start">Начать заново</button></div></section>';
+    '<button class="button secondary" data-action="demo-start">Начать заново</button>'+(tour?'':'<button class="button secondary" data-action="tour-start">Автопоказ</button>')+'</div></section>';
 }
 function attention(upcoming, latest, now) {
   const move=data.notices.find(n=>{
@@ -162,7 +163,7 @@ function requests() {
   const records=data.applications;
   return pageHeading('Заявки','Заказывайте документы и следите за статусом.','<div class="toolbar">'+newRequest+'<button class="button secondary" data-action="reload">Обновить</button></div>')+
     '<section class="panel"><header class="card-head"><h2>Мои заявки</h2></header>'+
-    (records.length?'<ul class="records">'+records.map(r=>'<li><div><a class="record-link" href="#requests/'+r.id+'">'+escapeText(r.title)+'</a><small>'+date(r.created)+'</small></div><span class="chip good">'+escapeText(r.status)+'</span></li>').join('')+'</ul>':'<div class="empty"><span class="empty-icon">'+icon('requests')+'</span><strong>Заявок пока нет</strong><p>Создайте заявку на справку, выписку или вопрос деканату.</p></div>')+'</section>'+
+    (records.length?'<ul class="records">'+records.map(r=>'<li><div><a class="record-link" href="#requests/'+r.id+'">'+escapeText(r.title)+'</a><small>'+(r.offer?date(r.offer.day)+' · '+r.offer.start+' · '+escapeText(r.offer.room):date(r.created))+'</small></div><span class="chip good">'+escapeText(r.status)+'</span></li>').join('')+'</ul>':'<div class="empty"><span class="empty-icon">'+icon('requests')+'</span><strong>Заявок пока нет</strong><p>Создайте заявку на справку, выписку или вопрос деканату.</p></div>')+'</section>'+
     '<section class="panel"><header class="card-head"><h2>Что можно запросить</h2></header><div class="service-grid">'+Object.entries(data.types).map(([key,t])=>'<button class="service" data-action="new" data-type="'+key+'">'+icon('requests')+'<strong>'+escapeText(t.title)+'</strong><small>'+escapeText(t.time)+'</small></button>').join('')+'</div></section>';
 }
 function notices() {
@@ -184,12 +185,12 @@ function demoScheduleForm() {
     '<p role="status" class="form-result"></p><button class="button primary">Опубликовать перенос</button></form></section>';
 }
 function staff() {
-  const pending=data.applications.filter(record=>!['Готово','Есть ответ'].includes(record.status));
+  const pending=data.applications.filter(record=>record.open).sort((a,b)=>(a.conflictDay||'9999').localeCompare(b.conflictDay||'9999') || a.created-b.created);
   const queue=[...pending,...data.applications.filter(record=>!pending.includes(record))];
   const actions='<div class="toolbar"><button class="button secondary" data-action="reload">Обновить очередь</button><button class="button secondary" data-action="logout">Выйти</button></div>';
   return pageHeading('Очередь деканата','Демонстрационный кабинет сотрудника. В работе: '+pending.length+'.',actions)+
     '<section class="panel"><header class="card-head"><h2>Заявки студентов</h2></header>'+
-    (queue.length?'<ul class="records">'+queue.map(r=>'<li><div><button class="plain-link" data-action="staff-detail" data-id="'+r.id+'">'+escapeText(r.title)+'</button><small>'+escapeText(r.student)+' · '+date(r.created)+'</small></div><span class="chip '+(['Готово','Есть ответ'].includes(r.status)?'good':'neutral')+'">'+escapeText(r.status)+'</span></li>').join('')+'</ul>':'<p class="muted">Заявок нет. Подайте первую из кабинета студента.</p>')+'</section>'+demoScheduleForm();
+    (queue.length?'<ul class="records">'+queue.map(r=>'<li><div><button class="plain-link" data-action="staff-detail" data-id="'+r.id+'">'+escapeText(r.title)+'</button><small>'+escapeText(r.student)+' · '+(r.conflictDay?'Конфликт '+date(r.conflictDay):date(r.created))+'</small></div><span class="chip '+(r.open?'neutral':'good')+'">'+escapeText(r.status)+'</span></li>').join('')+'</ul>':'<p class="muted">Заявок нет. Подайте первую из кабинета студента.</p>')+'</section>'+demoScheduleForm();
 }
 const pages={home,schedule,grades,requests,notices,profile,staff};
 function render(focus=false) {
@@ -198,7 +199,7 @@ function render(focus=false) {
   const staffMode=page==='staff';
   const sections=staffMode ? {staff:'Очередь'} : nav;
   const links=Object.entries(sections).map(([key,label])=>'<a class="nav-item" href="#'+key+'" '+(key===page?'aria-current="page"':'')+'>'+icon(key==='staff'?'requests':key)+'<span>'+label+'</span>'+(key==='notices' && data.notices.some(n=>!n.read)?'<i class="unread" aria-label="Есть непрочитанные"></i>':'')+'</a>').join('');
-  app.innerHTML='<a class="skip" href="#main-content">К содержанию</a><div class="layout"><aside class="sidebar"><a class="brand-link" href="#home" aria-label="Декана, главная">'+brand+'</a><nav aria-label="Разделы кабинета">'+links+'</nav><div class="sidebar-note">Конкурсный концепт<br>Вымышленные данные</div></aside><div class="work"><header class="topbar"><a class="mobile-brand" href="#home">'+brand+'</a><span class="crumb">Личный кабинет <span>/</span> '+sections[page]+'</span>'+(staffMode?'':'<button class="button secondary help-button" data-action="help">Помощник</button>')+'<a class="top-profile" href="'+(staffMode?'#staff':'#profile')+'" aria-label="Открыть профиль"><span class="avatar">'+escapeText(data.profile.initials)+'</span><span><strong>'+escapeText(data.profile.first)+'</strong><small>'+escapeText(data.profile.group)+'</small></span></a></header><main id="main-content" class="content">'+(juryBar(staffMode))+pages[page]()+'<footer>Декана · конкурсный концепт · вымышленные данные</footer></main></div></div><nav class="mobile-nav" aria-label="Разделы кабинета">'+links+'</nav><p id="toast" class="toast" role="status"></p><dialog id="dialog" aria-labelledby="dialog-title"></dialog>';
+  app.innerHTML='<a class="skip" href="#main-content">К содержанию</a><div class="layout"><aside class="sidebar"><a class="brand-link" href="#home" aria-label="Декана, главная">'+brand+'</a><nav aria-label="Разделы кабинета">'+links+'</nav><div class="sidebar-note">Конкурсный концепт<br>Вымышленные данные</div></aside><div class="work"><header class="topbar"><a class="mobile-brand" href="#home">'+brand+'</a><span class="crumb">Личный кабинет <span>/</span> '+sections[page]+'</span>'+(staffMode?'':'<button class="button secondary help-button" data-action="help">Помощник</button>')+'<a class="top-profile" href="'+(staffMode?'#staff':'#profile')+'" aria-label="Открыть профиль"><span class="avatar">'+escapeText(data.profile.initials)+'</span><span><strong>'+escapeText(data.profile.first)+'</strong><small>'+escapeText(data.profile.group)+'</small></span></a></header><main id="main-content" class="content">'+(juryBar(staffMode))+tourBanner()+pages[page]()+'<footer>Декана · конкурсный концепт · вымышленные данные</footer></main></div></div><nav class="mobile-nav" aria-label="Разделы кабинета">'+links+'</nav><p id="toast" class="toast" role="status"></p><dialog id="dialog" aria-labelledby="dialog-title"></dialog>';
   document.title=sections[page]+' · Декана';
   if (focus) document.querySelector('#page-title').focus();
 }

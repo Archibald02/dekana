@@ -77,16 +77,20 @@ async function issueSession(env, login, scope=null) {
 }
 const storedOwner = (scope,login) => scope ? scope+':'+login : login;
 const lastMessage = "(SELECT kind FROM application_messages WHERE application_id=applications.id ORDER BY id DESC LIMIT 1)";
-const fields = 'id,type,note,created,started_at,resolved_at,reply,'+lastMessage+' AS latest_message';
+const fields = 'id,type,note,created,started_at,resolved_at,reply,conflict_event,conflict_day,conflict_lesson,offer_start,offer_room,offer_at,accepted_at,'+lastMessage+' AS latest_message';
 const applicationId = '[a-f0-9-]{36}';
 function present(row) {
   const {id,type,note,created,started_at,resolved_at,reply} = row;
-  const status=resolved_at?(type==='request'?'Есть ответ':'Готово'):row.latest_message==='question'?'Нужно уточнение':started_at?'На рассмотрении':'Принята';
+  const status=row.accepted_at?'Замена подтверждена':resolved_at?(type==='request'?'Есть ответ':'Готово'):row.offer_at?'Предложена замена':row.latest_message==='question'?'Нужно уточнение':started_at?'На рассмотрении':'Принята';
   const history = [{at:created, label:'Заявка принята'}];
   if (started_at) history.push({at:started_at,label:'Взята на рассмотрение'});
-  if (resolved_at) history.push({at:resolved_at,label:type==='request'?'Деканат ответил':'Документ готов'});
+  if(row.offer_at) history.push({at:row.offer_at,label:'Деканат предложил замену'});
+  if(row.accepted_at) history.push({at:row.accepted_at,label:'Студент подтвердил замену'});
+  else if (resolved_at) history.push({at:resolved_at,label:type==='request'?'Деканат ответил':'Документ готов'});
   return {id,type,note,created,history,reply:reply || '',status,open:!resolved_at,inProgress:Boolean(started_at),
-    awaitingStudent:!resolved_at && row.latest_message==='question',title:types[type].title,time:types[type].time,
+    awaitingStudent:!resolved_at && !row.offer_at && row.latest_message==='question',
+    conflictEvent:row.conflict_event||null,conflictDay:row.conflict_day||null,
+    offer:row.offer_at ? {day:row.conflict_day,lesson:row.conflict_lesson,start:row.offer_start,room:row.offer_room,accepted:Boolean(row.accepted_at)} : null,title:types[type].title,time:types[type].time,
     documentReady:Boolean(resolved_at && type!=='request')};
 }
 function attachment(file,mime,name) {
@@ -113,18 +117,55 @@ async function messagesFor(env,id) {
 async function addMessage(env,row,kind,message) {
   if (typeof message!=='string' || !message.trim() || message.trim().length>500) return error('Напишите сообщение до 500 символов.',400);
   const predicate=kind==='question' ? "COALESCE("+lastMessage+",'')<>'question'" : lastMessage+"='question'";
-  const saved=await query(env,'INSERT INTO application_messages(application_id,kind,message,created) SELECT id,?,?,? FROM applications WHERE id=? AND owner=? AND started_at IS NOT NULL AND resolved_at IS NULL AND '+predicate+' AND (SELECT COUNT(*) FROM application_messages WHERE application_id=applications.id)<30 RETURNING id',
+  const saved=await query(env,'INSERT INTO application_messages(application_id,kind,message,created) SELECT id,?,?,? FROM applications WHERE id=? AND owner=? AND started_at IS NOT NULL AND resolved_at IS NULL AND offer_at IS NULL AND '+predicate+' AND (SELECT COUNT(*) FROM application_messages WHERE application_id=applications.id)<30 RETURNING id',
     kind,message.trim(),Date.now(),row.id,row.owner).first();
   return saved ? null : error('Статус изменился или достигнут предел сообщений. Обновите карточку.',409);
 }
 async function scheduleChange(env,owner,scope) {
   const replacement=await query(env,'SELECT event_id,day,start,new_start,room,published FROM demo_schedule_changes WHERE owner=?',storedOwner(scope,owner)).first();
-  if(replacement) return replacement;
+  if(replacement) return {...replacement,saved:true};
   if (scope && owner==='student.nord') {
     const next=baseSchedule(students[owner]).find(d=>d.day>today() && d.lessons.length>=2);
     if(next) return {day:next.day,start:'09:00',new_start:'11:00',room:'Б–312',published:today(),event_id:'jury-'+next.day};
   }
   return changes[owner];
+}
+async function academicFor(env,scope,owner) {
+  const storage=storedOwner(scope,owner);
+  const [change,booking,resolutions]=await Promise.all([
+    scheduleChange(env,owner,scope),
+    bookingFor(env,scope,owner),
+    query(env,'SELECT conflict_event,conflict_day,conflict_lesson,offer_start,offer_room FROM applications WHERE owner=? AND accepted_at IS NOT NULL ORDER BY accepted_at,id',storage).all()
+  ]);
+  return {change,booking,academic:academicData(students[owner],change,booking,resolutions.results)};
+}
+function optionsFor(academic,row,room) {
+  const conflict=academic.conflicts.find(item=>item.event===row.conflict_event);
+  if(!conflict) return [];
+  const busy=academic.schedule.find(day=>day.day===conflict.day).lessons.filter(item=>item!==conflict.moved);
+  const duration=minutes(conflict.moved.end)-minutes(conflict.moved.start);
+  return ['14:30','16:00','17:45'].map(start=>({start,end:shiftTime(start,duration),room:room+'–204'})).filter(item=>!busy.some(lesson=>overlaps(lesson,item)));
+}
+async function offerFor(env,scope,row) {
+  if(!row.conflict_event || row.resolved_at || row.offer_at) return [];
+  const owner=row.owner.split(':').at(-1);
+  const {academic}=await academicFor(env,scope,owner);
+  return optionsFor(academic,row,students[owner].room);
+}
+async function acceptOffer(env,scope,owner,row) {
+  const storage=storedOwner(scope,owner);
+  const {change,booking,academic}=await academicFor(env,scope,owner);
+  const valid=optionsFor(academic,row,students[owner].room).some(item=>item.start===row.offer_start && item.room===row.offer_room);
+  if(!valid) return error('Предложенное время больше не подходит. Попросите деканат проверить замену.',409);
+  const now=Date.now();
+  const updated=await query(env,`UPDATE applications SET accepted_at=?,resolved_at=?
+    WHERE owner=? AND id=? AND resolved_at IS NULL AND offer_at=?
+    AND COALESCE((SELECT event_id FROM demo_schedule_changes WHERE owner=?),'')=?
+    AND COALESCE((SELECT slot FROM consultation_bookings WHERE scope=? AND owner=? AND slot>=?),'')=?
+    AND NOT EXISTS(SELECT 1 FROM applications AS prior WHERE prior.owner=? AND prior.conflict_event=? AND prior.accepted_at IS NOT NULL)
+    RETURNING id`,now,now,storage,row.id,row.offer_at,storage,change?.saved?change.event_id:'',
+    scope,owner,students[owner].room+'-'+today(),booking?.id||'',storage,row.conflict_event).first();
+  return updated?respond({ok:true}):error('Расписание или статус уже изменились. Обновите заявку.',409);
 }
 async function publishDemoChange(request,env,scope) {
   const input=await body(request);
@@ -141,9 +182,9 @@ async function publishDemoChange(request,env,scope) {
     storedOwner(scope,input.owner),crypto.randomUUID(),target.day,lesson.key,newStart,room,today()).run();
   return respond({ok:true,day:target.day,start:newStart,room},201);
 }
-function staffRecord(row,messages) {
+function staffRecord(row,messages,options) {
   const login=row.owner.split(':').at(-1);
-  return {...present(row),messages,student:students[login]?.profile.name || 'Студент'};
+  return {...present(row),messages,options,student:students[login]?.profile.name || 'Студент'};
 }
 async function staffApi(request,env,path,scope) {
   const owners=Object.keys(students).map(login=>storedOwner(scope,login));
@@ -158,25 +199,34 @@ async function staffApi(request,env,path,scope) {
   const select=()=>query(env,'SELECT owner,'+fields+' FROM applications WHERE id=? AND owner IN (?,?)',id,...owners).first();
   const current=await select();
   if(!current) return error('Заявка не найдена.',404);
-  if(request.method==='GET') return respond(staffRecord(current,await messagesFor(env,id)));
+  const detail=async row=>staffRecord(row,await messagesFor(env,id),await offerFor(env,scope,row));
+  if(request.method==='GET') return respond(await detail(current));
   if(request.method!=='POST') return error('Страница не найдена.',404);
   const input=await body(request);
-  if(!['start','complete','question'].includes(input?.action)) return error('Выберите действие.',400);
+  if(!['start','complete','question','offer','withdraw'].includes(input?.action)) return error('Выберите действие.',400);
   if(input.action==='question') {
     const issue=await addMessage(env,current,'question',input.reply);
-    return issue || respond(staffRecord(await select(),await messagesFor(env,id)));
+    return issue || respond(await detail(await select()));
   }
   const now=Date.now();
   let updated;
   if(input.action==='start') {
     updated=await query(env,'UPDATE applications SET started_at=? WHERE id=? AND owner=? AND started_at IS NULL AND resolved_at IS NULL RETURNING id',now,id,current.owner).first();
+  } else if(input.action==='offer') {
+    const options=await offerFor(env,scope,current);
+    const option=options.find(item=>item.start===input.start);
+    if(!option) return error('Это время больше недоступно. Обновите заявку.',409);
+    updated=await query(env,"UPDATE applications SET offer_start=?,offer_room=?,offer_at=? WHERE id=? AND owner=? AND started_at IS NOT NULL AND resolved_at IS NULL AND offer_at IS NULL AND COALESCE("+lastMessage+",'')<>'question' RETURNING id",
+      option.start,option.room,now,id,current.owner).first();
+  } else if(input.action==='withdraw') {
+    updated=await query(env,'UPDATE applications SET offer_start=NULL,offer_room=NULL,offer_at=NULL WHERE id=? AND owner=? AND resolved_at IS NULL AND offer_at IS NOT NULL RETURNING id',id,current.owner).first();
   } else {
     const reply=typeof input.reply==='string'?input.reply.trim():'';
     if(reply.length>500 || (current.type==='request' && !reply)) return error('Для вопроса нужен ответ до 500 символов.',400);
-    updated=await query(env,"UPDATE applications SET resolved_at=?, reply=? WHERE id=? AND owner=? AND started_at IS NOT NULL AND resolved_at IS NULL AND COALESCE("+lastMessage+",'')<>'question' RETURNING id",now,reply,id,current.owner).first();
+    updated=await query(env,"UPDATE applications SET resolved_at=?, reply=? WHERE id=? AND owner=? AND started_at IS NOT NULL AND resolved_at IS NULL AND offer_at IS NULL AND COALESCE("+lastMessage+",'')<>'question' RETURNING id",now,reply,id,current.owner).first();
   }
   if(!updated) return error('Статус уже изменился. Обновите очередь.',409);
-  return respond(staffRecord(await select(),await messagesFor(env,id)));
+  return respond(await detail(await select()));
 }
 async function beginDemo(request,env,session) {
   const now=Date.now(), window=Math.floor(now/600000)*600000;
@@ -211,14 +261,13 @@ async function api(request,env,url) {
   if (path.startsWith('/api/staff/')) return error('Недоступно для этого аккаунта.',403);
   if (path === '/api/home' && method === 'GET') {
     const student = students[owner];
-    const [applications,read,change,booking,checks]=await Promise.all([
+    const [applications,read,snapshot,checks]=await Promise.all([
       query(env,'SELECT '+fields+' FROM applications WHERE owner = ? ORDER BY created DESC LIMIT 100',storage).all(),
       query(env,'SELECT notice FROM notices_read WHERE owner = ?',storage).all(),
-      scheduleChange(env,owner,scope),
-      bookingFor(env,scope,owner),
+      academicFor(env,scope,owner),
       query(env,'SELECT step FROM study_checks WHERE owner=?',storage).all(),
     ]);
-    const academic=academicData(student,change,booking);
+    const {academic,change,booking}=snapshot;
     const available=academic.slots.filter(slot=>!academic.schedule.find(d=>d.day===slot.day)?.lessons.some(lesson=>lesson.key!=='consultation' && overlaps(lesson,slot)));
     return respond({role:'student',demo:Boolean(scope),demoStudent:scope?owner:null,...academic,slots:available,booking,types,checks:checks.results.map(row=>row.step),
       applications:applications.results.map(present),notices:noticesFor(student,new Set(read.results.map(row=>row.notice)),academic,change)});
@@ -227,12 +276,24 @@ async function api(request,env,url) {
     const input = await body(request);
     const note = typeof input?.note === 'string' ? input.note.trim() : '';
     if (typeof input?.type !== 'string' || !own(types,input.type) || typeof input.note !== 'string' || note.length > 500 || (input.type === 'request' && !note)) return error('Укажите вид заявки и проверьте комментарий.',400);
-    const {type} = input;
-    const id = crypto.randomUUID();
-    const created = Date.now();
-    const row = await query(env,'INSERT INTO applications(id,owner,type,note,created) SELECT ?,?,?,?,? WHERE (SELECT COUNT(*) FROM applications WHERE owner = ?) < 100 RETURNING id',id,storage,type,note,created,storage).first();
-    if (!row) return error('В демоверсии доступно до 100 заявок на аккаунт.',409);
-    return respond(present({id,type,note,created}),201);
+    const {type}=input;
+    const conflictKey=typeof input.conflictEvent==='string' && type==='request' ? input.conflictEvent : null;
+    let conflict;
+    if(conflictKey) {
+      const {academic}=await academicFor(env,scope,owner);
+      conflict=academic.conflicts.find(item=>item.event===conflictKey);
+      if(!conflict) return error('Конфликт больше не актуален. Обновите расписание.',409);
+    }
+    const id=crypto.randomUUID();
+    const created=Date.now();
+    const row=await query(env,'INSERT INTO applications(id,owner,type,note,created,conflict_event,conflict_day,conflict_lesson) SELECT ?,?,?,?,?,?,?,? WHERE (SELECT COUNT(*) FROM applications WHERE owner=?)<100 ON CONFLICT DO NOTHING RETURNING id',
+      id,storage,type,note,created,conflictKey,conflict?.day||null,conflict?.moved.key||null,storage).first();
+    if(!row && conflictKey) {
+      const existing=await query(env,'SELECT '+fields+' FROM applications WHERE owner=? AND conflict_event=? AND resolved_at IS NULL',storage,conflictKey).first();
+      if(existing) return respond(present(existing));
+    }
+    if(!row) return error('В демоверсии доступно до 100 заявок на аккаунт.',409);
+    return respond(present({id,type,note,created,conflict_event:conflictKey}),201);
   }
   const record = path.match(new RegExp('^/api/applications/('+applicationId+')(/document)?$'));
   if (method === 'GET' && record) {
@@ -244,8 +305,13 @@ async function api(request,env,url) {
   }
   if (method==='POST' && record && !record[2]) {
     const input=await body(request);
-    const row=await query(env,'SELECT id,owner FROM applications WHERE id=? AND owner=?',record[1],storage).first();
+    const row=await query(env,'SELECT owner,'+fields+' FROM applications WHERE id=? AND owner=?',record[1],storage).first();
     if (!row) return error('Заявка не найдена.',404);
+    if(input?.action==='accept') {
+      if(row.accepted_at) return respond({ok:true});
+      if(!row.offer_at || row.resolved_at) return error('Активного предложения нет.',409);
+      return acceptOffer(env,scope,owner,row);
+    }
     const issue=await addMessage(env,row,'answer',input?.reply);
     return issue || respond({ok:true},201);
   }
@@ -263,7 +329,7 @@ async function api(request,env,url) {
       await query(env,'DELETE FROM consultation_bookings WHERE scope=? AND owner=?',scope,owner).run();
       return respond({ok:true});
     }
-    const academic=academicData(students[owner],await scheduleChange(env,owner,scope));
+    const {academic}=await academicFor(env,scope,owner);
     const slot=academic.slots.find(item=>item.id===input?.slot);
     if(!slot || academic.schedule.find(day=>day.day===slot.day)?.lessons.some(lesson=>overlaps(lesson,slot))) return error('Слот уже недоступен.',409);
     await query(env,'DELETE FROM consultation_bookings WHERE scope=? AND owner=? AND slot<?',scope,owner,students[owner].room+'-'+today()).run();

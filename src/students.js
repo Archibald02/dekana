@@ -81,7 +81,7 @@ function consultationSlots(student, schedule) {
   return schedule.filter(d=>d.day>today() && d.lessons.length).slice(0,3).map(d=>consultationSlot(student,d.day));
 }
 const overlaps = (a,b) => a.start<b.end && b.start<a.end;
-function academicData(student, change, booking) {
+function academicData(student, change, booking, resolutions=[]) {
   const date=today();
   const nextMonth=new Date(date+'T12:00:00Z');
   nextMonth.setUTCMonth(nextMonth.getUTCMonth()+1,1);
@@ -105,12 +105,23 @@ function academicData(student, change, booking) {
       moved.start=change.new_start;
     }
   }
+  for(const record of resolutions) {
+    const entry=schedule.find(d=>d.day===record.conflict_day);
+    const lesson=entry?.lessons.find(l=>l.key===record.conflict_lesson);
+    if(!lesson) continue;
+    if(lesson===moved && record.conflict_event!==(change.event_id || 'base:'+change.day)) continue;
+    lesson.change=lesson.room;
+    lesson.end=shiftTime(record.offer_start,minutes(lesson.end)-minutes(lesson.start));
+    lesson.start=record.offer_start;
+    lesson.room=record.offer_room;
+    lesson.resolved=true;
+  }
   if (booked) {
     const entry=schedule.find(d=>d.day===booked.day);
     entry?.lessons.push({...booked,name:'Консультация перед сессией',form:'Запись',key:'consultation'});
   }
   const conflicts=moved && changedDay.day>=date
-    ? changedDay.lessons.filter(item=>item!==moved && overlaps(item,moved)).map(item=>({day:changedDay.day,moved,other:item}))
+    ? changedDay.lessons.filter(item=>item!==moved && overlaps(item,moved)).map(item=>({event:change.event_id || 'base:'+change.day,day:changedDay.day,moved,other:item}))
     : [];
   for (const day of schedule) day.lessons.sort((a,b)=>a.start.localeCompare(b.start));
   return {today:date,profile:student.profile,grades,schedule,slots,conflicts};
@@ -122,7 +133,7 @@ function noticesFor(student, read, academic, change) {
     {id:'session', tag:'Сессия', title:student.notices[0], body:student.notices[1], to:upcoming ? 'grades/'+upcoming.id : 'grades', action:'К аттестации', day:'2026-11-21'},
     {id:'services', tag:'Деканат', title:'Справки можно заказать онлайн', body:'Выберите документ или отправьте вопрос деканату. Статус появится в разделе «Заявки».', to:'requests', action:'Открыть заявки', day:'2026-11-19'},
   ];
-  if (lesson) {
+  if (lesson && !lesson.resolved) {
     const displayDay = new Intl.DateTimeFormat('ru-RU',{day:'numeric',month:'long',timeZone:'Europe/Moscow'}).format(new Date(change.day+'T12:00:00Z'));
     notices.unshift({
       id:'room-'+(change.event_id || change.day), tag:'Расписание', title:'Перенос · '+lesson.name,
