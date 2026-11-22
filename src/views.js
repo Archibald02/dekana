@@ -24,9 +24,11 @@ const brand = '<span class="brand"><span class="logo" aria-hidden="true"><i></i>
 
 async function api(path,body) {
   const options = body === undefined ? {} : {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)};
-  const response = await fetch('/api/'+path,options);
-  let json;
-  try {json = await response.json();} catch {throw new Error('Не удалось связаться с кабинетом. Попробуйте ещё раз.');}
+  let response, json;
+  try {
+    response = await fetch('/api/'+path,options);
+    json = await response.json();
+  } catch {throw new Error('Не удалось связаться с кабинетом. Попробуйте ещё раз.');}
   if (!response.ok) throw Object.assign(new Error(json.error),{status:response.status});
   return json;
 }
@@ -45,6 +47,8 @@ function login(message='') {
   day = null;
   detail = null;
   app.innerHTML = '<main class="login"><section class="login-art">'+brand+'<div class="orbit"></div><div class="login-copy"><span class="eyebrow">СТУДЕНЧЕСКИЙ КАБИНЕТ</span><h1>Всё по&nbsp;учёбе.<br>В одном месте.</h1><p>Пары, оценки, заявки и новости деканата под рукой.</p></div><p class="login-caption">Конкурсный концепт · Вымышленные данные</p></section><section class="login-area"><div class="login-card"><span class="eyebrow">ЛИЧНЫЙ КАБИНЕТ</span><h2>Войти в Декану</h2><p class="muted">Введите данные тестового аккаунта.</p><form id="login-form"><label for="login">Логин</label><input id="login" name="login" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="80" placeholder="student.nord" required><label for="password">Пароль</label><input id="password" name="password" autocomplete="current-password" type="password" maxlength="128" placeholder="Введите пароль" required><p class="error" role="alert">'+escapeText(message)+'</p><button class="button primary" type="submit">Войти</button></form><button class="button secondary demo-login" data-action="demo-start">Открыть режим жюри</button><button class="button secondary demo-login" data-action="tour-start">Автопоказ для жюри · 1 минута</button><p class="login-legal">Конкурсный прототип цифрового деканата. Используются вымышленные данные.</p></div></section></main>';
+  app.querySelector('.demo-login').insertAdjacentHTML('beforebegin',
+    '<p class="jury-help muted">В режиме жюри откройте конфликт на главной Леи. Предложите замену за сотрудника деканата и подтвердите её за Лею.</p>');
   app.querySelector('form').addEventListener('submit',async event=>{
     event.preventDefault();
     const form=event.currentTarget, button=form.querySelector('button'), values=new FormData(form);
@@ -100,11 +104,12 @@ function juryBar(staffMode) {
   if(!data.demo) return '';
   const active=staffMode?'staff.demo':data.demoStudent;
   const roles=[['student.nord','Лея'],['staff.demo','Деканат'],['student.vega','Марк']];
-  return '<section class="jury-bar" aria-label="Демо для жюри"><div><strong>Демо для жюри</strong><small>Лея: конфликт и обращение · Деканат: уточнение · Лея: ответ · Марк: отдельный кабинет</small></div><div class="toolbar">'+
+  return '<section class="jury-bar" aria-label="Демо для жюри"><div><strong>Демо для жюри</strong><small>Откройте конфликт на главной Леи. В деканате предложите замену, затем вернитесь к Лее и подтвердите её.</small></div><div class="toolbar">'+
     roles.map(([role,label])=>'<button class="button '+(role===active?'primary':'secondary')+'" data-action="demo-role" data-role="'+role+'" aria-pressed="'+(role===active)+'" '+(role===active?'disabled':'')+'>'+label+'</button>').join('')+
     '<button class="button secondary" data-action="demo-start">Начать заново</button>'+(tour?'':'<button class="button secondary" data-action="tour-start">Автопоказ</button>')+'</div></section>';
 }
-function attention(upcoming, latest, now) {
+const moscowTime = () => new Intl.DateTimeFormat('en-GB',{hour:'2-digit',minute:'2-digit',timeZone:'Europe/Moscow',hourCycle:'h23'}).format(new Date());
+function attention(upcoming, now) {
   const move=data.notices.find(n=>{
     if (!n.id.startsWith('room-') || n.read) return false;
     const [,target,start]=n.to.split('/');
@@ -112,16 +117,25 @@ function attention(upcoming, latest, now) {
     return target>data.today || (target===data.today && lesson?.end>now);
   });
   const cards=[];
+  const pending=data.applications.find(record=>record.awaitingStudent || (record.open && record.offer));
+  const ready=data.applications.find(record=>record.documentReady);
+  const primary=pending || ready || data.applications[0];
+  for(const application of [primary,pending?ready:null].filter(Boolean)) {
+    const {id,title,status,documentReady,awaitingStudent,offer,reply,type}=application;
+    const action=awaitingStudent?'Ответить деканату':application.open && offer?'Посмотреть предложенную замену':
+      documentReady?(type==='study'?'Скачать справку':'Скачать выписку'):reply?'Прочитать ответ':'Открыть заявку';
+    cards.push({tag:status,title,body:action,href:documentReady?'/api/applications/'+id+'/document':'#requests/'+id,
+      download:documentReady,style:application===pending?'warn':'good'});
+  }
   if(move) cards.push({tag:'Перенос пары',title:move.title.slice('Перенос · '.length),body:move.body,to:move.to,style:'warn'});
   if(upcoming) cards.push({tag:upcoming.form,title:upcoming.name,body:date(upcoming.date)+' · '+upcoming.time+' · '+upcoming.room,to:'grades/'+upcoming.id,style:'neutral'});
-  if(latest) cards.push({tag:latest.status,title:latest.title,body:latest.documentReady?'Можно скачать PDF':latest.reply?'Деканат прислал ответ':'Открыть историю заявки',to:'requests/'+latest.id,style:'good'});
   if (!cards.length) return '';
   return '<section class="panel"><header class="card-head"><h2>Что требует внимания</h2></header><div class="attention-grid">'+cards.map(card=>
-    '<a class="attention-item" href="#'+escapeText(card.to)+'"><span class="chip '+card.style+'">'+escapeText(card.tag)+'</span><strong>'+escapeText(card.title)+'</strong><small>'+escapeText(card.body)+'</small></a>'
+    '<a class="attention-item" href="'+escapeText(card.href || '#'+card.to)+'"'+(card.download?' download':'')+'><span class="chip '+card.style+'">'+escapeText(card.tag)+'</span><strong>'+escapeText(card.title)+'</strong><small>'+escapeText(card.body)+'</small></a>'
   ).join('')+'</div></section>';
 }
 function home() {
-  const now = new Intl.DateTimeFormat('en-GB',{hour:'2-digit',minute:'2-digit',timeZone:'Europe/Moscow',hourCycle:'h23'}).format(new Date());
+  const now = moscowTime();
   const nextDay = data.schedule.find(d=>d.day>=data.today && d.lessons.some(l=>d.day>data.today || l.end>now));
   const current = nextDay?.lessons.find(l=>nextDay.day>data.today || l.end>now);
   const todayLessons = data.schedule.find(d=>d.day===data.today).lessons;
@@ -129,7 +143,7 @@ function home() {
   const upcoming = data.grades.filter(g=>!g.grade).sort((a,b)=>a.date.localeCompare(b.date))[0];
   return '<header class="welcome"><div class="eyebrow">'+date(data.today,{weekday:'long',day:'numeric',month:'long'}).toUpperCase()+'</div><h1 tabindex="-1" id="page-title">Привет, '+escapeText(data.profile.first)+'!</h1><p>Вот что у тебя по учёбе.</p></header>'+
     '<section class="hero"><div class="orbit"></div><div class="hero-content"><span class="eyebrow">'+(current && nextDay.day===data.today && current.start<=now?'ПАРА СЕЙЧАС':'БЛИЖАЙШАЯ ПАРА')+'</span><h2>'+escapeText(current?.name || 'В расписании пока свободно')+'</h2>'+(current?'<div class="hero-meta"><span>'+icon('clock')+date(nextDay.day,{weekday:'short',day:'numeric',month:'short'})+' · '+current.start+'–'+current.end+'</span><span>'+icon('pin')+escapeText(current.room)+'</span></div>'+(current.change?'<p class="hero-change">'+escapeText(current.change)+' → '+escapeText(current.room)+'</p>':''):'')+'<a class="button light" href="#schedule'+(nextDay?'/'+nextDay.day+'/'+current.key:'')+'">Открыть расписание</a></div></section>'+
-    conflictPanel()+attention(upcoming,latest,now)+'<div class="dashboard"><section class="panel"><header class="card-head"><div><h2>Сегодня</h2><p>'+date(data.today,{weekday:'long',day:'numeric',month:'long'})+'</p></div>'+scheduleLink+'</header>'+lessonRows(todayLessons)+'</section>'+
+    conflictPanel()+'<div id="home-attention">'+attention(upcoming,now)+'</div><div class="dashboard"><section class="panel"><header class="card-head"><div><h2>Сегодня</h2><p>'+date(data.today,{weekday:'long',day:'numeric',month:'long'})+'</p></div>'+scheduleLink+'</header>'+lessonRows(todayLessons)+'</section>'+
     prepCard()+
     '<section class="panel sidecard"><header class="card-head"><span class="tile">'+icon('requests')+'</span><a class="text-link" href="#requests">Все заявки</a></header><h2>Справки и заявления</h2>'+(latest?'<p><strong>'+escapeText(latest.title)+'</strong> <span class="chip good">'+escapeText(latest.status)+'</span></p>':'<p class="muted">Закажите справку или задайте вопрос деканату.</p>')+newRequest+'</section>'+
     '<section class="panel sidecard"><header class="card-head"><span class="tile">'+icon('notices')+'</span><a class="text-link" href="#notices">Все новости</a></header><h2>'+escapeText(data.notices.find(n=>!n.read)?.title || 'Все новости прочитаны')+'</h2><p class="muted">'+data.notices.filter(n=>!n.read).length+' из '+data.notices.length+' объявлений ожидают прочтения</p></section></div>';

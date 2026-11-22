@@ -128,7 +128,10 @@ async function scheduleChange(env,owner,scope) {
     const next=baseSchedule(students[owner]).find(d=>d.day>today() && d.lessons.length>=2);
     if(next) return {day:next.day,start:'09:00',new_start:'11:00',room:'Б–312',published:today(),event_id:'jury-'+next.day};
   }
-  return changes[owner];
+  const preset=changes[owner];
+  if(preset.day>=today()) return preset;
+  const next=baseSchedule(students[owner]).find(d=>d.day>today() && d.lessons.some(l=>l.key===preset.start));
+  return next ? {...preset,day:next.day,published:today()} : preset;
 }
 async function academicFor(env,scope,owner) {
   const storage=storedOwner(scope,owner);
@@ -276,8 +279,22 @@ async function api(request,env,url) {
     const input = await body(request);
     const note = typeof input?.note === 'string' ? input.note.trim() : '';
     if (typeof input?.type !== 'string' || !own(types,input.type) || typeof input.note !== 'string' || note.length > 500 || (input.type === 'request' && !note)) return error('Укажите вид заявки и проверьте комментарий.',400);
-    const {type}=input;
+    const {type,submissionId=null}=input;
+    if (submissionId!==null && (typeof submissionId!=='string' || !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(submissionId))) {
+      return error('Откройте форму заново и повторите отправку.',400);
+    }
     const conflictKey=typeof input.conflictEvent==='string' && type==='request' ? input.conflictEvent : null;
+    const previous=async ()=>{
+      if(!submissionId) return null;
+      const existing=await query(env,'SELECT '+fields+' FROM applications WHERE owner=? AND submission_id=?',storage,submissionId).first();
+      if(!existing) return null;
+      if(existing.type!==type || existing.note!==note || existing.conflict_event!==conflictKey) {
+        return error('Эта заявка уже отправлена. Проверьте её в разделе «Заявки».',409);
+      }
+      return respond(present(existing));
+    };
+    const retry=await previous();
+    if(retry) return retry;
     let conflict;
     if(conflictKey) {
       const {academic}=await academicFor(env,scope,owner);
@@ -286,8 +303,12 @@ async function api(request,env,url) {
     }
     const id=crypto.randomUUID();
     const created=Date.now();
-    const row=await query(env,'INSERT INTO applications(id,owner,type,note,created,conflict_event,conflict_day,conflict_lesson) SELECT ?,?,?,?,?,?,?,? WHERE (SELECT COUNT(*) FROM applications WHERE owner=?)<100 ON CONFLICT DO NOTHING RETURNING id',
-      id,storage,type,note,created,conflictKey,conflict?.day||null,conflict?.moved.key||null,storage).first();
+    const row=await query(env,'INSERT INTO applications(id,owner,type,note,created,conflict_event,conflict_day,conflict_lesson,submission_id) SELECT ?,?,?,?,?,?,?,?,? WHERE (SELECT COUNT(*) FROM applications WHERE owner=?)<100 ON CONFLICT DO NOTHING RETURNING id',
+      id,storage,type,note,created,conflictKey,conflict?.day||null,conflict?.moved.key||null,submissionId,storage).first();
+    if(!row) {
+      const concurrent=await previous();
+      if(concurrent) return concurrent;
+    }
     if(!row && conflictKey) {
       const existing=await query(env,'SELECT '+fields+' FROM applications WHERE owner=? AND conflict_event=? AND resolved_at IS NULL',storage,conflictKey).first();
       if(existing) return respond(present(existing));

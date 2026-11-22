@@ -106,17 +106,20 @@ function replacementDetails(record,staff=false) {
   const offer=record.offer;
   const dateLine=date(offer.day)+' · '+offer.start+' · '+escapeText(offer.room);
   return '<section class="replacement"><h3>'+(offer.accepted?'Замена внесена в расписание':'Занятие с резервной группой')+'</h3><p>'+dateLine+'</p>'+
-    (!staff && offer.accepted?'<a class="button secondary" href="#schedule/'+offer.day+'/'+offer.lesson+'">Открыть расписание</a>':
+    (!staff && offer.accepted?'<a class="button primary" href="#schedule/'+offer.day+'/'+offer.lesson+'">Открыть обновлённое расписание</a>':
      !staff?'<button class="button primary" data-action="accept-offer">Подтвердить замену</button><p class="error" role="alert"></p>':'')+'</section>';
 }
 function showDetail(result) {
   const dialog=document.querySelector('#dialog');
+  const nextStep=result.awaitingStudent?'Ответьте на вопрос деканата ниже.':
+    result.open && !result.inProgress?'Деканат возьмёт заявку на рассмотрение.':
+    result.open && !result.offer?'Деканат рассматривает заявку. Проверить результат можно здесь.':'';
   dialog.innerHTML='<div class="dialog-head"><h2 id="dialog-title">'+escapeText(result.title)+'</h2>'+closeDialog+'</div>'+
-    '<p><span class="chip '+(result.awaitingStudent?'warn':'good')+'">'+escapeText(result.status)+'</span></p>'+
+    '<p><span class="chip '+(result.awaitingStudent?'warn':'good')+'">'+escapeText(result.status==='Принята'?'Заявка принята':result.status)+'</span></p>'+
+    (result.open?'<p class="muted">Ориентир по сроку: '+escapeText(result.time)+'. '+nextStep+'</p>':'')+
     timeline(result)+replacementDetails(result)+(result.note?'<p class="request-note">'+escapeText(result.note)+'</p>':'')+messageThread(result)+
     (result.reply?'<p class="request-note"><strong>Ответ деканата</strong><br>'+escapeText(result.reply)+'</p>':'')+
     (result.awaitingStudent?'<form id="answer-form"><label for="student-reply">Уточнение для деканата</label><textarea id="student-reply" name="reply" rows="3" maxlength="500" required></textarea><p class="error" role="alert"></p><button class="button primary">Отправить уточнение</button></form>':'')+
-    (result.open?'<p class="muted">Ориентир по сроку: '+escapeText(result.time)+'.</p>':'')+
     '<div class="toolbar">'+(result.documentReady?'<a class="button primary" href="/api/applications/'+result.id+'/document" download>Скачать демо-PDF</a>':'')+
     '<button class="button secondary" data-action="refresh-detail">Обновить статус</button></div>';
   if(!dialog.open) dialog.showModal();
@@ -247,6 +250,7 @@ function newApplication(initial='',prefill='',conflictEvent=null) {
   dialog.innerHTML='<div class="dialog-head"><h2 id="dialog-title">Новая заявка</h2><button class="close" data-action="close" aria-label="Закрыть">×</button></div><form id="application-form"><label for="type">Что нужно</label><select id="type" name="type" required>'+Object.entries(data.types).map(([k,t])=>'<option value="'+k+'" '+(k===initial?'selected':'')+'>'+escapeText(t.title)+'</option>').join('')+'</select><p id="estimate" class="muted"></p><label for="note">Комментарий</label><textarea id="note" name="note" maxlength="500" rows="3" placeholder="Только вымышленные сведения">'+escapeText(prefill)+'</textarea><p class="error" role="alert"></p><button class="button primary" type="submit">Отправить заявку</button></form>';
   dialog.showModal();
   const form=dialog.querySelector('form');
+  const submissionId=crypto.randomUUID();
   function update() {
     const type=form.elements.type.value;
     form.elements.note.required=type==='request';
@@ -259,9 +263,10 @@ function newApplication(initial='',prefill='',conflictEvent=null) {
     const button=form.querySelector('button[type=submit]');
     button.disabled=true;
     button.textContent='Отправляем…';
+    alertText(form.querySelector('.error'),'');
     try{
       const payload=Object.fromEntries(new FormData(form));
-      const result=await api('applications',{...payload,conflictEvent});
+      const result=await api('applications',{...payload,conflictEvent,submissionId});
       if(!data.applications.some(item=>item.id===result.id)) data.applications.unshift(result);
       dialog.close();
       go('requests/'+result.id);
@@ -269,7 +274,7 @@ function newApplication(initial='',prefill='',conflictEvent=null) {
       if(e.status===401) return login('Сессия закончилась. Войдите снова.');
       alertText(form.querySelector('.error'),e.message);
       button.disabled=false;
-      button.textContent='Отправить заявку';
+      button.textContent=e.status && e.status<500?'Отправить заявку':'Повторить отправку';
     }
   });
 }
@@ -300,6 +305,23 @@ async function route(focus=true) {
   }
   const id=location.hash.match(/^#requests\/([a-f0-9-]{36})$/)?.[1];
   if (id && data) await openDetail(id,version);
+  if(focus && activePage()==='home') await refreshHomeAttention();
+}
+async function refreshHomeAttention() {
+  const current=data, version=navigation;
+  const region=document.querySelector('#home-attention');
+  if(!current || !region || tour) return;
+  try {
+    const fresh=await api('home');
+    if(data!==current || version!==navigation || !region.isConnected || fresh.role!=='student' ||
+      fresh.profile.group!==current.profile.group) return;
+    current.applications=fresh.applications;
+    const upcoming=current.grades.filter(g=>!g.grade).sort((a,b)=>a.date.localeCompare(b.date))[0];
+    const updated=attention(upcoming,moscowTime());
+    if(region.innerHTML!==updated && !region.contains(document.activeElement)) region.innerHTML=updated;
+  } catch {
+    // Keep the current page usable if the background refresh fails.
+  }
 }
 async function start() {
   try {data=await api('home'); await route(false);}
@@ -403,6 +425,9 @@ app.addEventListener('close',event=>{
   }
 },true);
 window.addEventListener('hashchange',()=>route());
+document.addEventListener('visibilitychange',()=>{
+  if(!document.hidden && activePage()==='home') refreshHomeAttention();
+});
 start();
 
 app.addEventListener('submit',async event=>{

@@ -97,6 +97,45 @@ test('Публичные ресурсы не включают учебные д�
   } finally {db.close();}
 });
 
+test('Повтор отправки создаёт одну заявку, ключ изолирован по студенту, готовый PDF выдаётся владельцу',async t=>{
+  const db=localDB();
+  t.after(()=>db.close());
+  const call=(...args)=>server(db,...args);
+  const start=await call('/api/demo/start',{body:{}});
+  const cookie=start.headers.get('set-cookie').split(';')[0];
+  const role=async name=>assert.equal((await call('/api/demo/switch',{cookie,body:{role:name}})).status,200);
+  const payload={type:'study',note:'Прошу подготовить справку.',submissionId:crypto.randomUUID()};
+  const submit=(body=payload)=>call('/api/applications',{cookie,body});
+  const results=await Promise.all([submit(),submit()]);
+  assert.deepEqual(results.map(result=>result.status).sort(),[200,201]);
+  const [first,retry]=await Promise.all(results.map(result=>result.json()));
+  assert.equal(first.id,retry.id);
+  assert.equal((await submit({...payload,note:'Другой комментарий'})).status,409);
+  const original='/api/applications/'+first.id;
+
+  await role('staff.demo');
+  const home=await (await call('/api/home',{cookie})).json();
+  assert.equal(home.applications.length,1);
+  const edit='/api/staff/applications/'+first.id;
+  assert.equal((await call(edit,{cookie,body:{action:'start'}})).status,200);
+  assert.equal((await call(edit,{cookie,body:{action:'complete'}})).status,200);
+
+  await role('student.nord');
+  const completed=await submit();
+  assert.equal(completed.status,200);
+  assert.equal((await completed.json()).status,'Готово');
+  const pdf=await call(original+'/document',{cookie});
+  assert.equal(pdf.headers.get('Content-Type'),'application/pdf');
+  assert.match(await pdf.text(),/^%PDF/);
+
+  await role('student.vega');
+  assert.equal((await call(original,{cookie})).status,404);
+  assert.equal((await call(original+'/document',{cookie})).status,404);
+  const other=await submit();
+  assert.equal(other.status,201);
+  assert.notEqual((await other.json()).id,first.id);
+});
+
 test('Демопроходы изолированы, а конфликт и уточнение проходят через обе роли',async t=>{
   const db=localDB();
   t.after(()=>db.close());
