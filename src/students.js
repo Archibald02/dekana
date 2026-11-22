@@ -51,38 +51,72 @@ function plus(day, offset) {
 }
 const defaultRooms = [204,208,110];
 const lessonStarts = ['09:00','10:45','12:30'];
-function academicData(student, change) {
+const lessonEnds = ['10:30','12:15','14:00'];
+const minutes = time => Number(time.slice(0,2))*60+Number(time.slice(3));
+function shiftTime(time, offset) {
+  const total=minutes(time)+offset;
+  return String(Math.floor(total/60)).padStart(2,'0')+':'+String(total%60).padStart(2,'0');
+}
+function baseSchedule(student) {
   const date = today();
-  const nextMonth = new Date(date + 'T12:00:00Z');
-  nextMonth.setUTCMonth(nextMonth.getUTCMonth()+1, 1);
-  const month = nextMonth.toISOString().slice(0,7);
-  const grades = student.subjects.map(([name,form,grade,day], index)=>({id:String(index+1),name,form,grade,date:month+'-'+day,time:'10:00',room:student.room+'–204'}));
   const weekdayToday = new Date(date + 'T12:00:00Z').getUTCDay();
-  const start = plus(date, -((weekdayToday + 6) % 7) - 7);
-  return {
-    today: date,
-    profile: student.profile,
-    grades,
-    schedule: Array.from({length:21}, (_, index) => {
-      const day = plus(start, index);
-      const weekday = new Date(day +'T12:00:00Z').getUTCDay();
-      if (weekday === 0 || weekday === 6) return {day, lessons:[]};
-      const count = weekday === 3 ? 2 : 3;
-      const lessons = Array.from({length:count},(_, n)=>({
-        name: student.subjects[(weekday+n-1)%student.subjects.length][0],
-        teacher: student.teacher[n],
-        start: lessonStarts[n],
-        end: ['10:30','12:15','14:00'][n],
-        form:['Лекция','Семинар','Практика'][n],
-        room: day===change.day && lessonStarts[n]===change.start ? change.room : student.room+'–'+defaultRooms[n],
-        change: day===change.day && lessonStarts[n]===change.start ? change.previous : '',
-      }));
-      return {day, lessons};
-    }),
-  };
+  const start = plus(date, -((weekdayToday+6)%7)-7);
+  return Array.from({length:21},(_, index)=>{
+    const day = plus(start,index);
+    const weekday = new Date(day+'T12:00:00Z').getUTCDay();
+    const count=[0,3,3,2,3,3,0][weekday];
+    return {day,lessons:Array.from({length:count},(_,n)=>({
+      name:student.subjects[(weekday+n-1)%student.subjects.length][0],teacher:student.teacher[n],
+      key:lessonStarts[n],start:lessonStarts[n],end:lessonEnds[n],
+      form:['Лекция','Семинар','Практика'][n],room:student.room+'–'+defaultRooms[n]
+    }))};
+  });
+}
+function consultationSlot(student, day) {
+  const late = new Date(day+'T12:00:00Z').getUTCDay()%2===0;
+  return {id:student.room+'-'+day,start:late?'15:15':'14:20',end:late?'15:35':'14:40',
+    day,room:student.room+'–204',teacher:student.teacher[0]};
+}
+function consultationSlots(student, schedule) {
+  return schedule.filter(d=>d.day>today() && d.lessons.length).slice(0,3).map(d=>consultationSlot(student,d.day));
+}
+const overlaps = (a,b) => a.start<b.end && b.start<a.end;
+function academicData(student, change, booking) {
+  const date=today();
+  const nextMonth=new Date(date+'T12:00:00Z');
+  nextMonth.setUTCMonth(nextMonth.getUTCMonth()+1,1);
+  const month=nextMonth.toISOString().slice(0,7);
+  const grades=student.subjects.map(([name,form,grade,day],index)=>{
+    const exam=month+'-'+day;
+    const requirement=index%2===0 ? 'Сдать тренировочную работу' : 'Подготовить материалы проекта';
+    return {id:String(index+1),name,form,grade,date:exam,time:'10:00',room:student.room+'–204',
+      steps:grade?[]:[{id:index+1+':'+exam+':work',label:requirement,date:plus(exam,-4)},{id:index+1+':'+exam+':prep',label:form==='Экзамен'?'Прийти на консультацию':'Проверить допуск',date:plus(exam,-1)},{label:form,date:exam}]};
+  });
+  const schedule=baseSchedule(student);
+  const slots=consultationSlots(student,schedule);
+  const booked=booking;
+  const changedDay=schedule.find(d=>d.day===change?.day);
+  const moved=changedDay?.lessons.find(l=>l.key===change.start);
+  if (moved) {
+    moved.change=moved.room;
+    moved.room=change.room;
+    if (change.new_start && change.new_start!==moved.start) {
+      moved.end=shiftTime(change.new_start,minutes(moved.end)-minutes(moved.start));
+      moved.start=change.new_start;
+    }
+  }
+  if (booked) {
+    const entry=schedule.find(d=>d.day===booked.day);
+    entry?.lessons.push({...booked,name:'Консультация перед сессией',form:'Запись',key:'consultation'});
+  }
+  const conflicts=moved && changedDay.day>=date
+    ? changedDay.lessons.filter(item=>item!==moved && overlaps(item,moved)).map(item=>({day:changedDay.day,moved,other:item}))
+    : [];
+  for (const day of schedule) day.lessons.sort((a,b)=>a.start.localeCompare(b.start));
+  return {today:date,profile:student.profile,grades,schedule,slots,conflicts};
 }
 function noticesFor(student, read, academic, change) {
-  const lesson = academic.schedule.find(d=>d.day===change.day)?.lessons.find(l=>l.start===change.start);
+  const lesson = academic.schedule.find(d=>d.day===change.day)?.lessons.find(l=>l.key===change.start);
   const upcoming = academic.grades.filter(g=>!g.grade).sort((a,b)=>a.date.localeCompare(b.date))[0];
   const notices = [
     {id:'session', tag:'Сессия', title:student.notices[0], body:student.notices[1], to:upcoming ? 'grades/'+upcoming.id : 'grades', action:'К аттестации', day:'2026-11-21'},
@@ -92,7 +126,7 @@ function noticesFor(student, read, academic, change) {
     const displayDay = new Intl.DateTimeFormat('ru-RU',{day:'numeric',month:'long',timeZone:'Europe/Moscow'}).format(new Date(change.day+'T12:00:00Z'));
     notices.unshift({
       id:'room-'+(change.event_id || change.day), tag:'Расписание', title:'Перенос · '+lesson.name,
-      body:displayDay+', '+change.start+' · из '+change.previous+' в '+change.room,
+      body:displayDay+' · '+(lesson.start!==change.start?change.start+' → '+lesson.start:lesson.start)+' · '+(lesson.change===lesson.room?lesson.room:lesson.change+' → '+lesson.room),
       to:'schedule/'+change.day+'/'+change.start, action:'К изменённой паре', day:change.published || '2026-11-22',
     });
   }

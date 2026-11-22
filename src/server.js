@@ -23,8 +23,8 @@ async function signedIn(request,env) {
   const token = request.headers.get('cookie')?.match(/(?:^|;\s*)dekana_session=([a-f0-9]{64})(?:;|$)/)?.[1];
   if (!token) return null;
   const tokenHash = await digest(token);
-  const row = await query(env,'SELECT student FROM sessions WHERE token_hash = ? AND expires > ?',tokenHash,Date.now()).first();
-  return row && (own(students,row.student) || row.student === staffLogin) ? { student:row.student, tokenHash } : null;
+  const row = await query(env,'SELECT student,demo_scope FROM sessions WHERE token_hash = ? AND expires > ?',tokenHash,Date.now()).first();
+  return row && (own(students,row.student) || row.student === staffLogin) ? {student:row.student,scope:row.demo_scope||'',tokenHash} : null;
 }
 async function body(request) {
   if (request.headers.get('content-type')?.split(';')[0] !== 'application/json' || !request.body) return null;
@@ -68,77 +68,124 @@ async function login(request,env) {
   if (old) await query(env,'DELETE FROM sessions WHERE token_hash = ?',old.tokenHash).run();
   await query(env,'DELETE FROM sessions WHERE expires <= ?',now).run();
   await query(env,'DELETE FROM login_limits WHERE expires <= ?',now).run();
-  const token = hex(crypto.getRandomValues(new Uint8Array(32)));
-  await query(env,'INSERT INTO sessions(token_hash,student,expires) VALUES (?,?,?)',await digest(token),login,now+ttl).run();
+  return issueSession(env,login);
+}
+async function issueSession(env, login, scope=null) {
+  const token=hex(crypto.getRandomValues(new Uint8Array(32)));
+  await query(env,'INSERT INTO sessions(token_hash,student,expires,demo_scope) VALUES (?,?,?,?)',await digest(token),login,Date.now()+ttl,scope).run();
   return respond({ok:true},200,{'Set-Cookie':cookie(token,ttl/1000,env)});
 }
-const fields = 'id,type,note,created,started_at,resolved_at,reply';
+const storedOwner = (scope,login) => scope ? scope+':'+login : login;
+const lastMessage = "(SELECT kind FROM application_messages WHERE application_id=applications.id ORDER BY id DESC LIMIT 1)";
+const fields = 'id,type,note,created,started_at,resolved_at,reply,'+lastMessage+' AS latest_message';
 const applicationId = '[a-f0-9-]{36}';
 function present(row) {
   const {id,type,note,created,started_at,resolved_at,reply} = row;
-  const status = resolved_at ? (type==='request' ? 'Есть ответ' : 'Готово') : started_at ? 'На рассмотрении' : 'Принята';
+  const status=resolved_at?(type==='request'?'Есть ответ':'Готово'):row.latest_message==='question'?'Нужно уточнение':started_at?'На рассмотрении':'Принята';
   const history = [{at:created, label:'Заявка принята'}];
   if (started_at) history.push({at:started_at,label:'Взята на рассмотрение'});
   if (resolved_at) history.push({at:resolved_at,label:type==='request'?'Деканат ответил':'Документ готов'});
-  return {id,type,note,created,history,reply:reply || '',status,title:types[type].title,time:types[type].time,
+  return {id,type,note,created,history,reply:reply || '',status,open:!resolved_at,inProgress:Boolean(started_at),
+    awaitingStudent:!resolved_at && row.latest_message==='question',title:types[type].title,time:types[type].time,
     documentReady:Boolean(resolved_at && type!=='request')};
 }
 function attachment(file,mime,name) {
   return new Response(file,{headers:{...security,'Content-Type':mime,'Content-Disposition':'attachment; filename="'+name+'"','Cache-Control':'no-store'}});
 }
 function calendar(item,owner) {
-  const day=item.date.replaceAll('-','');
+  const day=item.day.replaceAll('-','');
   const stamp=new Date().toISOString().replace(/[-:]|\.\d{3}/g,'');
+  const utc=time=>new Date(item.day+'T'+time+':00+03:00').toISOString().replace(/[-:]|\.\d{3}/g,'');
   return attachment([
     'BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//Dekana//Student Portal//RU','CALSCALE:GREGORIAN',
     'BEGIN:VEVENT','UID:'+owner+'-'+item.id+'-'+day+'@dekana.example','DTSTAMP:'+stamp,
-    'DTSTART:'+day+'T070000Z','DTEND:'+day+'T080000Z','SUMMARY:'+item.form+' · '+item.name,
+    'DTSTART:'+utc(item.start),'DTEND:'+utc(item.end),'SUMMARY:'+item.name,
     'LOCATION:'+item.room,'DESCRIPTION:Демособытие','END:VEVENT','END:VCALENDAR',''
-  ].join('\r\n'),'text/calendar; charset=utf-8','dekana-assessment.ics');
+  ].join('\r\n'),'text/calendar; charset=utf-8','dekana-event.ics');
 }
-async function scheduleChange(env, owner) {
-  const replacement = await query(env,'SELECT event_id,day,start,room,published FROM demo_schedule_changes WHERE owner = ?',owner).first();
-  if (!replacement) return changes[owner];
-  return {...replacement,previous:students[owner].room+'–'+defaultRooms[lessonStarts.indexOf(replacement.start)]};
+async function bookingFor(env,scope,owner) {
+  const row=await query(env,'SELECT slot FROM consultation_bookings WHERE scope=? AND owner=? AND slot>=?',scope,owner,students[owner].room+'-'+today()).first();
+  return row ? consultationSlot(students[owner],row.slot.slice(2)) : null;
 }
-async function publishDemoChange(request,env) {
-  const input = await body(request);
+async function messagesFor(env,id) {
+  return (await query(env,'SELECT kind,message,created FROM application_messages WHERE application_id=? ORDER BY id',id).all()).results;
+}
+async function addMessage(env,row,kind,message) {
+  if (typeof message!=='string' || !message.trim() || message.trim().length>500) return error('Напишите сообщение до 500 символов.',400);
+  const predicate=kind==='question' ? "COALESCE("+lastMessage+",'')<>'question'" : lastMessage+"='question'";
+  const saved=await query(env,'INSERT INTO application_messages(application_id,kind,message,created) SELECT id,?,?,? FROM applications WHERE id=? AND owner=? AND started_at IS NOT NULL AND resolved_at IS NULL AND '+predicate+' AND (SELECT COUNT(*) FROM application_messages WHERE application_id=applications.id)<30 RETURNING id',
+    kind,message.trim(),Date.now(),row.id,row.owner).first();
+  return saved ? null : error('Статус изменился или достигнут предел сообщений. Обновите карточку.',409);
+}
+async function scheduleChange(env,owner,scope) {
+  const replacement=await query(env,'SELECT event_id,day,start,new_start,room,published FROM demo_schedule_changes WHERE owner=?',storedOwner(scope,owner)).first();
+  if(replacement) return replacement;
+  if (scope && owner==='student.nord') {
+    const next=baseSchedule(students[owner]).find(d=>d.day>today() && d.lessons.length>=2);
+    if(next) return {day:next.day,start:'09:00',new_start:'11:00',room:'Б–312',published:today(),event_id:'jury-'+next.day};
+  }
+  return changes[owner];
+}
+async function publishDemoChange(request,env,scope) {
+  const input=await body(request);
   if (!input || typeof input.owner!=='string' || !own(students,input.owner) || !lessonStarts.includes(input.start) ||
-      typeof input.room!=='string' || !/^[А-ЯA-Z]([-– ])?[0-9]{2,4}$/u.test(input.room.trim())) return error('Проверьте группу, время и аудиторию.',400);
-  const student=students[input.owner];
-  const target=academicData(student,{}).schedule.find(d=>d.day===input.day && d.day>=today());
-  const lesson=target?.lessons.find(l=>l.start===input.start);
-  if (!lesson) return error('В этот день и время занятия нет.',400);
+      typeof input.room!=='string' || !/^[А-ЯA-Z][– -]?[0-9]{2,4}$/u.test(input.room.trim())) return error('Проверьте группу, время и аудиторию.',400);
+  const newStart=input.newStart || input.start;
+  if (typeof newStart!=='string' || !/^(0[8-9]|1[0-9]|20):[0-5][0-9]$/.test(newStart)) return error('Укажите новое время с 08:00 до 20:59.',400);
+  const target=baseSchedule(students[input.owner]).find(d=>d.day===input.day && d.day>=today());
+  const lesson=target?.lessons.find(l=>l.key===input.start);
+  if(!lesson) return error('В этот день и время занятия нет.',400);
   const room=input.room.trim().replace(/^([А-ЯA-Z])[-– ]?/u,'$1–');
-  if (room===lesson.room) return error('Выберите новую аудиторию.',400);
-  await query(env,'INSERT INTO demo_schedule_changes(owner,event_id,day,start,room,published) VALUES (?,?,?,?,?,?) ON CONFLICT(owner) DO UPDATE SET event_id=excluded.event_id,day=excluded.day,start=excluded.start,room=excluded.room,published=excluded.published',
-    input.owner,crypto.randomUUID(),target.day,lesson.start,room,today()).run();
-  return respond({ok:true,day:target.day,start:lesson.start,room},201);
+  if(room===lesson.room && newStart===lesson.start) return error('Измените время или аудиторию.',400);
+  await query(env,'INSERT INTO demo_schedule_changes(owner,event_id,day,start,new_start,room,published) VALUES (?,?,?,?,?,?,?) ON CONFLICT(owner) DO UPDATE SET event_id=excluded.event_id,day=excluded.day,start=excluded.start,new_start=excluded.new_start,room=excluded.room,published=excluded.published',
+    storedOwner(scope,input.owner),crypto.randomUUID(),target.day,lesson.key,newStart,room,today()).run();
+  return respond({ok:true,day:target.day,start:newStart,room},201);
 }
-async function staffApi(request,env,path) {
-  if (path === '/api/home' && request.method === 'GET') {
-    const {results} = await query(env,'SELECT owner,'+fields+' FROM applications ORDER BY created DESC LIMIT 200').all();
+function staffRecord(row,messages) {
+  const login=row.owner.split(':').at(-1);
+  return {...present(row),messages,student:students[login]?.profile.name || 'Студент'};
+}
+async function staffApi(request,env,path,scope) {
+  const owners=Object.keys(students).map(login=>storedOwner(scope,login));
+  if(path==='/api/home' && request.method==='GET') {
+    const {results}=await query(env,'SELECT owner,'+fields+' FROM applications WHERE owner IN (?,?) ORDER BY created DESC LIMIT 200',...owners).all();
     const groups=Object.entries(students).map(([value,student])=>({value,label:student.profile.group}));
-    return respond({role:'staff',profile:staffProfile,today:today(),groups,applications:results.map(row=>({...present(row),student:students[row.owner]?.profile.name || 'Студент'}))});
+    return respond({role:'staff',profile:staffProfile,today:today(),groups,demo:Boolean(scope),applications:results.map(row=>staffRecord(row))});
   }
-  if(path==='/api/staff/schedule' && request.method==='POST') return publishDemoChange(request,env);
-  const id = path.match(new RegExp('^/api/staff/applications/('+applicationId+')$'))?.[1];
-  if (!id || request.method !== 'POST') return error('Страница не найдена.',404);
-  const input = await body(request);
-  if (!['start','complete'].includes(input?.action)) return error('Выберите действие.',400);
-  const current = await query(env,'SELECT owner,'+fields+' FROM applications WHERE id = ?',id).first();
-  if (!current) return error('Заявка не найдена.',404);
-  const now = Date.now();
+  if(path==='/api/staff/schedule' && request.method==='POST') return publishDemoChange(request,env,scope);
+  const id=path.match(new RegExp('^/api/staff/applications/('+applicationId+')$'))?.[1];
+  if(!id) return error('Страница не найдена.',404);
+  const select=()=>query(env,'SELECT owner,'+fields+' FROM applications WHERE id=? AND owner IN (?,?)',id,...owners).first();
+  const current=await select();
+  if(!current) return error('Заявка не найдена.',404);
+  if(request.method==='GET') return respond(staffRecord(current,await messagesFor(env,id)));
+  if(request.method!=='POST') return error('Страница не найдена.',404);
+  const input=await body(request);
+  if(!['start','complete','question'].includes(input?.action)) return error('Выберите действие.',400);
+  if(input.action==='question') {
+    const issue=await addMessage(env,current,'question',input.reply);
+    return issue || respond(staffRecord(await select(),await messagesFor(env,id)));
+  }
+  const now=Date.now();
   let updated;
-  if (input.action === 'start') {
-    updated = await query(env,'UPDATE applications SET started_at = ? WHERE id = ? AND started_at IS NULL AND resolved_at IS NULL RETURNING owner,'+fields,now,id).first();
+  if(input.action==='start') {
+    updated=await query(env,'UPDATE applications SET started_at=? WHERE id=? AND owner=? AND started_at IS NULL AND resolved_at IS NULL RETURNING id',now,id,current.owner).first();
   } else {
-    const reply = typeof input.reply==='string' ? input.reply.trim() : '';
-    if (reply.length>500 || (current.type==='request' && !reply)) return error('Для вопроса нужен ответ до 500 символов.',400);
-    updated = await query(env,'UPDATE applications SET resolved_at = ?, reply = ? WHERE id = ? AND started_at IS NOT NULL AND resolved_at IS NULL RETURNING owner,'+fields,now,reply,id).first();
+    const reply=typeof input.reply==='string'?input.reply.trim():'';
+    if(reply.length>500 || (current.type==='request' && !reply)) return error('Для вопроса нужен ответ до 500 символов.',400);
+    updated=await query(env,"UPDATE applications SET resolved_at=?, reply=? WHERE id=? AND owner=? AND started_at IS NOT NULL AND resolved_at IS NULL AND COALESCE("+lastMessage+",'')<>'question' RETURNING id",now,reply,id,current.owner).first();
   }
-  if (!updated) return error('Статус уже изменился. Обновите очередь.',409);
-  return respond({...present(updated),student:students[updated.owner]?.profile.name || 'Студент'});
+  if(!updated) return error('Статус уже изменился. Обновите очередь.',409);
+  return respond(staffRecord(await select(),await messagesFor(env,id)));
+}
+async function beginDemo(request,env,session) {
+  const now=Date.now(), window=Math.floor(now/600000)*600000;
+  const ip=request.headers.get('CF-Connecting-IP')||'unknown';
+  const bucket=await digest('jury:'+ip+':'+window);
+  const limit=await query(env,'INSERT INTO login_limits(bucket,attempts,expires) VALUES (?,?,?) ON CONFLICT(bucket) DO UPDATE SET attempts=attempts+1 WHERE attempts<25 RETURNING attempts',bucket,1,window+600000).first();
+  if(!limit) return error('Слишком много пробных входов. Повторите позже.',429);
+  if(session) await query(env,'DELETE FROM sessions WHERE token_hash=?',session.tokenHash).run();
+  return issueSession(env,'student.nord',crypto.randomUUID());
 }
 async function api(request,env,url) {
   const path = url.pathname;
@@ -146,23 +193,35 @@ async function api(request,env,url) {
   if (method === 'POST' && request.headers.get('origin') !== url.origin) return error('Запрос отклонён.',403);
   if (path === '/api/login' && method === 'POST') return login(request,env);
   const session = await signedIn(request,env);
+  if (path==='/api/demo/start' && method==='POST') return beginDemo(request,env,session);
   if (!session) return error('Войдите в кабинет.',401);
-  const owner = session.student;
+  const {scope,student:owner}=session;
+  const storage=storedOwner(scope,owner);
+  if(path==='/api/demo/switch' && method==='POST') {
+    const input=await body(request);
+    if(!scope || typeof input?.role!=='string' || (!own(students,input.role) && input.role!==staffLogin)) return error('Переключение доступно в деморежиме.',403);
+    const changed=await query(env,'UPDATE sessions SET student=? WHERE token_hash=? AND demo_scope=? AND expires>? RETURNING student',input.role,session.tokenHash,scope,Date.now()).first();
+    return changed ? respond({ok:true}) : error('Сессия закончилась.',401);
+  }
   if (path === '/api/logout' && method === 'POST') {
     await query(env,'DELETE FROM sessions WHERE token_hash = ?',session.tokenHash).run();
     return respond({ok:true},200,{'Set-Cookie':cookie('',0,env)});
   }
-  if (owner === staffLogin) return staffApi(request,env,path);
+  if (owner === staffLogin) return staffApi(request,env,path,scope);
   if (path.startsWith('/api/staff/')) return error('Недоступно для этого аккаунта.',403);
   if (path === '/api/home' && method === 'GET') {
     const student = students[owner];
-    const [applications,read,change] = await Promise.all([
-      query(env,'SELECT '+fields+' FROM applications WHERE owner = ? ORDER BY created DESC LIMIT 100',owner).all(),
-      query(env,'SELECT notice FROM notices_read WHERE owner = ?',owner).all(),
-      scheduleChange(env,owner),
+    const [applications,read,change,booking,checks]=await Promise.all([
+      query(env,'SELECT '+fields+' FROM applications WHERE owner = ? ORDER BY created DESC LIMIT 100',storage).all(),
+      query(env,'SELECT notice FROM notices_read WHERE owner = ?',storage).all(),
+      scheduleChange(env,owner,scope),
+      bookingFor(env,scope,owner),
+      query(env,'SELECT step FROM study_checks WHERE owner=?',storage).all(),
     ]);
-    const academic = academicData(student,change);
-    return respond({role:'student',...academic,types,applications:applications.results.map(present),notices:noticesFor(student,new Set(read.results.map(row=>row.notice)),academic,change)});
+    const academic=academicData(student,change,booking);
+    const available=academic.slots.filter(slot=>!academic.schedule.find(d=>d.day===slot.day)?.lessons.some(lesson=>lesson.key!=='consultation' && overlaps(lesson,slot)));
+    return respond({role:'student',demo:Boolean(scope),demoStudent:scope?owner:null,...academic,slots:available,booking,types,checks:checks.results.map(row=>row.step),
+      applications:applications.results.map(present),notices:noticesFor(student,new Set(read.results.map(row=>row.notice)),academic,change)});
   }
   if (path === '/api/applications' && method === 'POST') {
     const input = await body(request);
@@ -171,28 +230,60 @@ async function api(request,env,url) {
     const {type} = input;
     const id = crypto.randomUUID();
     const created = Date.now();
-    const row = await query(env,'INSERT INTO applications(id,owner,type,note,created) SELECT ?,?,?,?,? WHERE (SELECT COUNT(*) FROM applications WHERE owner = ?) < 100 RETURNING id',id,owner,type,note,created,owner).first();
+    const row = await query(env,'INSERT INTO applications(id,owner,type,note,created) SELECT ?,?,?,?,? WHERE (SELECT COUNT(*) FROM applications WHERE owner = ?) < 100 RETURNING id',id,storage,type,note,created,storage).first();
     if (!row) return error('В демоверсии доступно до 100 заявок на аккаунт.',409);
     return respond(present({id,type,note,created}),201);
   }
   const record = path.match(new RegExp('^/api/applications/('+applicationId+')(/document)?$'));
   if (method === 'GET' && record) {
-    const row = await query(env,'SELECT '+fields+' FROM applications WHERE id = ? AND owner = ?',record[1],owner).first();
+    const row = await query(env,'SELECT '+fields+' FROM applications WHERE id = ? AND owner = ?',record[1],storage).first();
     if (!row) return error('Заявка не найдена.',404);
-    if (!record[2]) return respond(present(row));
+    if (!record[2]) return respond({...present(row),messages:await messagesFor(env,row.id)});
     const bytes = row.resolved_at && documents[owner+':'+row.type];
     return bytes ? attachment(Uint8Array.from(atob(bytes),c=>c.charCodeAt(0)),'application/pdf','dekana-demo.pdf') : error('Документ ещё недоступен.',404);
   }
-  const event = path.match(/^\/api\/calendar\/([1-9][0-9]*)$/);
-  if (method === 'GET' && event) {
-    const item = academicData(students[owner],changes[owner]).grades.find(g=>g.id===event[1] && !g.grade);
-    return item ? calendar(item,owner) : error('Предстоящая аттестация не найдена.',404);
+  if (method==='POST' && record && !record[2]) {
+    const input=await body(request);
+    const row=await query(env,'SELECT id,owner FROM applications WHERE id=? AND owner=?',record[1],storage).first();
+    if (!row) return error('Заявка не найдена.',404);
+    const issue=await addMessage(env,row,'answer',input?.reply);
+    return issue || respond({ok:true},201);
+  }
+  if(path==='/api/study/check' && method==='POST') {
+    const input=await body(request);
+    const valid=typeof input?.step==='string' && academicData(students[owner]).grades.some(g=>g.steps.some(step=>step.id===input.step));
+    if(!valid || typeof input.done!=='boolean') return error('Учебная задача не найдена.',404);
+    const sql=input.done?'INSERT OR IGNORE INTO study_checks(owner,step) VALUES (?,?)':'DELETE FROM study_checks WHERE owner=? AND step=?';
+    await query(env,sql,storage,input.step).run();
+    return respond({ok:true});
+  }
+  if (path==='/api/consultation' && method==='POST') {
+    const input=await body(request);
+    if(input?.action==='cancel') {
+      await query(env,'DELETE FROM consultation_bookings WHERE scope=? AND owner=?',scope,owner).run();
+      return respond({ok:true});
+    }
+    const academic=academicData(students[owner],await scheduleChange(env,owner,scope));
+    const slot=academic.slots.find(item=>item.id===input?.slot);
+    if(!slot || academic.schedule.find(day=>day.day===slot.day)?.lessons.some(lesson=>overlaps(lesson,slot))) return error('Слот уже недоступен.',409);
+    await query(env,'DELETE FROM consultation_bookings WHERE scope=? AND owner=? AND slot<?',scope,owner,students[owner].room+'-'+today()).run();
+    const booked=await query(env,'INSERT INTO consultation_bookings(scope,slot,owner) VALUES (?,?,?) ON CONFLICT DO NOTHING RETURNING slot',scope,slot.id,owner).first();
+    return booked ? respond({ok:true},201) : error('Уже есть запись или слот занят.',409);
+  }
+  if(path==='/api/calendar/consultation' && method==='GET') {
+    const booked=await bookingFor(env,scope,owner);
+    return booked ? calendar({...booked,name:'Консультация перед сессией'},owner) : error('Запись на консультацию не найдена.',404);
+  }
+  const event=path.match(/^\/api\/calendar\/([1-9][0-9]*)$/);
+  if (method==='GET' && event) {
+    const item=academicData(students[owner]).grades.find(g=>g.id===event[1] && !g.grade);
+    return item ? calendar({...item,day:item.date,start:item.time,end:shiftTime(item.time,60),name:item.form+' · '+item.name},owner) : error('Предстоящая аттестация не найдена.',404);
   }
   if (path === '/api/notices/read' && method === 'POST') {
     const input = await body(request);
-    const change = await scheduleChange(env,owner);
+    const change = await scheduleChange(env,owner,scope);
     if (!['room-'+(change.event_id || change.day),'session','services'].includes(input?.id)) return error('Объявление не найдено.',404);
-    await query(env,'INSERT OR IGNORE INTO notices_read(owner,notice) VALUES (?,?)',owner,input.id).run();
+    await query(env,'INSERT OR IGNORE INTO notices_read(owner,notice) VALUES (?,?)',storage,input.id).run();
     return respond({ok:true});
   }
   return error('Страница не найдена.',404);

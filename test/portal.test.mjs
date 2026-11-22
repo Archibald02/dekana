@@ -96,3 +96,62 @@ test('Публичные ресурсы не включают учебные д�
     }
   } finally {db.close();}
 });
+
+test('Демопроходы изолированы, а конфликт и уточнение проходят через обе роли',async t=>{
+  const db=localDB();
+  t.after(()=>db.close());
+  const call=(...args)=>server(db,...args);
+  async function demo(){
+    const result=await call('/api/demo/start',{body:{}});
+    assert.equal(result.status,200);
+    return result.headers.get('set-cookie').split(';')[0];
+  }
+  const one=await demo(), two=await demo();
+  const home=async cookie=>await (await call('/api/home',{cookie})).json();
+  const switchRole=async (cookie,role)=>assert.equal((await call('/api/demo/switch',{cookie,body:{role}})).status,200);
+  const student=await home(one);
+  assert.equal(student.demo,true);
+  const [conflict]=student.conflicts;
+  assert.ok(conflict && conflict.moved.start<conflict.other.end);
+  const step=student.grades.find(g=>g.steps.length).steps[0].id;
+  assert.equal((await call('/api/study/check',{cookie:one,body:{step,done:true}})).status,200);
+  assert.deepEqual((await home(one)).checks,[step]);
+  assert.deepEqual((await home(two)).checks,[]);
+  const slot=student.slots[0].id;
+  assert.equal((await call('/api/consultation',{cookie:one,body:{slot}})).status,201);
+  assert.equal((await call('/api/consultation',{cookie:one,body:{slot}})).status,409);
+  assert.equal((await call('/api/consultation',{cookie:two,body:{slot}})).status,201);
+  assert.match(await (await call('/api/calendar/consultation',{cookie:one})).text(),/BEGIN:VEVENT/);
+  assert.equal((await call('/api/consultation',{cookie:two,body:{action:'cancel'}})).status,200);
+  assert.equal((await home(one)).booking.id,slot);
+  assert.equal((await home(two)).booking,null);
+  const submitted=await call('/api/applications',{cookie:one,body:{type:'request',note:'Пересечение двух занятий.'}});
+  assert.equal(submitted.status,201);
+  const {id}=await submitted.json();
+  const application='/api/applications/'+id;
+  const staff='/api/staff/applications/'+id;
+  assert.equal((await call(application,{cookie:two})).status,404);
+  await switchRole(two,'staff.demo');
+  assert.equal((await call(staff,{cookie:two})).status,404);
+  await switchRole(one,'staff.demo');
+  assert.equal((await home(one)).applications[0].id,id);
+  assert.equal((await call(staff,{cookie:one,body:{action:'start'}})).status,200);
+  assert.equal((await call(staff,{cookie:one,body:{action:'question',reply:'Какую пару вы сможете посетить?'}})).status,200);
+  assert.equal((await call(staff,{cookie:one,body:{action:'complete',reply:'Преждевременно'}})).status,409);
+  await switchRole(one,'student.vega');
+  assert.equal((await call(application,{cookie:one,body:{reply:'Чужой ответ'}})).status,404);
+  await switchRole(one,'student.nord');
+  const waiting=await (await call(application,{cookie:one})).json();
+  assert.equal(waiting.status,'Нужно уточнение');
+  assert.equal(waiting.messages[0].kind,'question');
+  assert.equal((await call(application,{cookie:one,body:{reply:'Могу прийти на семинар.'}})).status,201);
+  assert.equal((await call(application,{cookie:one,body:{reply:'Повтор'}})).status,409);
+  await switchRole(one,'staff.demo');
+  assert.equal((await call(staff,{cookie:one,body:{action:'complete',reply:'Согласовано.'}})).status,200);
+  await switchRole(one,'student.nord');
+  const finished=await (await call(application,{cookie:one})).json();
+  assert.equal(finished.status,'Есть ответ');
+  assert.deepEqual(finished.messages.map(message=>message.kind),['question','answer']);
+  const fresh=await demo();
+  assert.deepEqual((await home(fresh)).applications,[]);
+});

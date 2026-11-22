@@ -44,7 +44,7 @@ function login(message='') {
   data = null;
   day = null;
   detail = null;
-  app.innerHTML = '<main class="login"><section class="login-art">'+brand+'<div class="orbit"></div><div class="login-copy"><span class="eyebrow">СТУДЕНЧЕСКИЙ КАБИНЕТ</span><h1>Всё по&nbsp;учёбе.<br>В одном месте.</h1><p>Пары, оценки, заявки и новости деканата под рукой.</p></div><p class="login-caption">Конкурсный концепт · Вымышленные данные</p></section><section class="login-area"><div class="login-card"><span class="eyebrow">ЛИЧНЫЙ КАБИНЕТ</span><h2>Войти в Декану</h2><p class="muted">Введите данные тестового аккаунта.</p><form id="login-form"><label for="login">Логин</label><input id="login" name="login" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="80" placeholder="student.nord" required><label for="password">Пароль</label><input id="password" name="password" autocomplete="current-password" type="password" maxlength="128" placeholder="Введите пароль" required><p class="error" role="alert">'+escapeText(message)+'</p><button class="button primary" type="submit">Войти</button></form><p class="login-legal">Конкурсный прототип цифрового деканата. Используются вымышленные данные.</p></div></section></main>';
+  app.innerHTML = '<main class="login"><section class="login-art">'+brand+'<div class="orbit"></div><div class="login-copy"><span class="eyebrow">СТУДЕНЧЕСКИЙ КАБИНЕТ</span><h1>Всё по&nbsp;учёбе.<br>В одном месте.</h1><p>Пары, оценки, заявки и новости деканата под рукой.</p></div><p class="login-caption">Конкурсный концепт · Вымышленные данные</p></section><section class="login-area"><div class="login-card"><span class="eyebrow">ЛИЧНЫЙ КАБИНЕТ</span><h2>Войти в Декану</h2><p class="muted">Введите данные тестового аккаунта.</p><form id="login-form"><label for="login">Логин</label><input id="login" name="login" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="80" placeholder="student.nord" required><label for="password">Пароль</label><input id="password" name="password" autocomplete="current-password" type="password" maxlength="128" placeholder="Введите пароль" required><p class="error" role="alert">'+escapeText(message)+'</p><button class="button primary" type="submit">Войти</button></form><button class="button secondary demo-login" data-action="demo-start">Открыть режим жюри</button><p class="login-legal">Конкурсный прототип цифрового деканата. Используются вымышленные данные.</p></div></section></main>';
   app.querySelector('form').addEventListener('submit',async event=>{
     event.preventDefault();
     const form=event.currentTarget, button=form.querySelector('button'), values=new FormData(form);
@@ -68,13 +68,46 @@ function pageHeading(title,copy,action='') {
 const scheduleLink = '<a class="text-link" href="#schedule">Всё расписание</a>';
 const newRequest = '<button class="button primary" data-action="new">'+icon('plus')+'Новая заявка</button>';
 function lessonRows(lessons, selectedTime) {
-  return lessons.length ? '<ul class="lessons">'+lessons.map(item=>'<li id="lesson-'+item.start.replace(':','')+'" class="lesson'+(selectedTime===item.start?' spotlight':'')+'" tabindex="-1"><div class="lesson-time"><strong>'+item.start+'</strong><small>'+item.end+'</small></div><div class="lesson-main"><strong>'+escapeText(item.name)+'</strong><small>'+escapeText(item.form)+' · '+escapeText(item.teacher)+'</small>'+(item.change ? '<span class="chip warn">'+escapeText(item.change)+' → '+escapeText(item.room)+'</span>':'')+'</div><span class="room">'+escapeText(item.room)+'</span></li>').join('')+'</ul>' : '<div class="empty"><span class="empty-icon">'+icon('schedule')+'</span><strong>Пар по расписанию нет</strong><p>Выберите другой день или посмотрите планы на неделю.</p></div>';
+  return lessons.length ? '<ul class="lessons">'+lessons.map(item=>'<li id="lesson-'+item.key.replace(':','')+'" class="lesson'+(selectedTime===item.key?' spotlight':'')+'" tabindex="-1"><div class="lesson-time"><strong>'+item.start+'</strong><small>'+item.end+'</small></div><div class="lesson-main"><strong>'+escapeText(item.name)+'</strong><small>'+escapeText(item.form)+' · '+escapeText(item.teacher)+'</small>'+(item.change ? '<span class="chip warn">'+escapeText(item.key===item.start?item.change+' → '+item.room:item.key+' → '+item.start)+'</span>':'')+'</div><button class="room map-link" data-action="map" data-room="'+escapeText(item.room)+'" aria-label="Схема, аудитория '+escapeText(item.room)+'">'+escapeText(item.room)+'</button></li>').join('')+'</ul>' : '<div class="empty"><span class="empty-icon">'+icon('schedule')+'</span><strong>Пар по расписанию нет</strong><p>Выберите другой день или посмотрите планы на неделю.</p></div>';
+}
+function conflictPanel(onlyDay) {
+  const [conflict]=onlyDay?data.conflicts.filter(event=>event.day===onlyDay):data.conflicts;
+  if(!conflict) return '';
+  const {moved,other,day:conflictDay}=conflict;
+  return '<section class="panel conflict" aria-labelledby="conflict-title"><span class="chip warn">Конфликт расписания</span>'+
+    '<h2 id="conflict-title">'+escapeText(moved.name)+' пересекается с другим занятием</h2>'+
+    '<p>'+date(conflictDay)+' · '+escapeText(moved.name)+' '+moved.start+'–'+moved.end+' · '+escapeText(other.name)+' '+other.start+'–'+other.end+'</p>'+
+    '<div class="toolbar"><a class="button secondary" href="#schedule/'+conflictDay+'/'+moved.key+'">Посмотреть занятие</a>'+
+    '<button class="button primary" data-action="conflict">Сообщить деканату</button></div></section>';
+}
+const upcomingSteps = () => data.grades.flatMap(g=>g.steps.map(step=>({...step,subject:g.name,grade:g.id})))
+  .filter(step=>!data.checks.includes(step.id)).sort((a,b)=>a.date.localeCompare(b.date));
+function prepCard() {
+  const [first]=upcomingSteps();
+  return '<section class="panel sidecard"><header class="card-head"><span class="tile">'+icon('grades')+'</span><a class="text-link" href="#grades'+(first?'/'+first.grade:'')+'">План сессии</a></header><h2>Ближайший срок</h2>'+
+    (first?'<p><strong>'+escapeText(first.label)+'</strong></p><p class="muted">'+escapeText(first.subject)+' · '+date(first.date)+'</p>':'<p class="muted">В ближайшем плане задач нет.</p>')+'</section>';
+}
+function consultation() {
+  const current=data.booking;
+  const body=current?
+    '<div class="consult-confirmed"><span class="chip good">Запись подтверждена</span><p><strong>'+date(current.day)+' · '+current.start+'–'+current.end+'</strong><br>'+escapeText(current.teacher)+' · '+escapeText(current.room)+'</p><div class="toolbar"><a class="text-link" href="/api/calendar/consultation" download>В календарь</a><button class="button secondary" data-action="map" data-room="'+escapeText(current.room)+'">Схема корпуса</button><button class="button secondary" data-action="consult" data-kind="cancel">Отменить запись</button></div></div>'
+    : data.slots.length?'<ul class="records">'+data.slots.map(slot=>'<li><div><strong>'+date(slot.day)+' · '+slot.start+'</strong><small>'+escapeText(slot.teacher)+' · '+escapeText(slot.room)+'</small></div><button class="button secondary" data-action="consult" data-slot="'+slot.id+'">Записаться</button></li>').join('')+'</ul>'
+    : '<p class="muted">Подходящих слотов пока нет.</p>';
+  return '<section id="consultation" class="panel"><header class="card-head"><div><h2>Консультация перед сессией</h2><p>Выберите свободное время.</p></div></header>'+body+'</section>';
+}
+function juryBar(staffMode) {
+  if(!data.demo) return '';
+  const active=staffMode?'staff.demo':data.demoStudent;
+  const roles=[['student.nord','Лея'],['staff.demo','Деканат'],['student.vega','Марк']];
+  return '<section class="jury-bar" aria-label="Демо для жюри"><div><strong>Демо для жюри</strong><small>Лея: конфликт и обращение · Деканат: уточнение · Лея: ответ · Марк: отдельный кабинет</small></div><div class="toolbar">'+
+    roles.map(([role,label])=>'<button class="button '+(role===active?'primary':'secondary')+'" data-action="demo-role" data-role="'+role+'" aria-pressed="'+(role===active)+'" '+(role===active?'disabled':'')+'>'+label+'</button>').join('')+
+    '<button class="button secondary" data-action="demo-start">Начать заново</button></div></section>';
 }
 function attention(upcoming, latest, now) {
   const move=data.notices.find(n=>{
     if (!n.id.startsWith('room-') || n.read) return false;
     const [,target,start]=n.to.split('/');
-    const lesson=data.schedule.find(d=>d.day===target)?.lessons.find(l=>l.start===start);
+    const lesson=data.schedule.find(d=>d.day===target)?.lessons.find(l=>l.key===start);
     return target>data.today || (target===data.today && lesson?.end>now);
   });
   const cards=[];
@@ -94,9 +127,9 @@ function home() {
   const latest = data.applications[0];
   const upcoming = data.grades.filter(g=>!g.grade).sort((a,b)=>a.date.localeCompare(b.date))[0];
   return '<header class="welcome"><div class="eyebrow">'+date(data.today,{weekday:'long',day:'numeric',month:'long'}).toUpperCase()+'</div><h1 tabindex="-1" id="page-title">Привет, '+escapeText(data.profile.first)+'!</h1><p>Вот что у тебя по учёбе.</p></header>'+
-    '<section class="hero"><div class="orbit"></div><div class="hero-content"><span class="eyebrow">'+(current && nextDay.day===data.today && current.start<=now?'ПАРА СЕЙЧАС':'БЛИЖАЙШАЯ ПАРА')+'</span><h2>'+escapeText(current?.name || 'В расписании пока свободно')+'</h2>'+(current?'<div class="hero-meta"><span>'+icon('clock')+date(nextDay.day,{weekday:'short',day:'numeric',month:'short'})+' · '+current.start+'–'+current.end+'</span><span>'+icon('pin')+escapeText(current.room)+'</span></div>'+(current.change?'<p class="hero-change">'+escapeText(current.change)+' → '+escapeText(current.room)+'</p>':''):'')+'<a class="button light" href="#schedule'+(nextDay?'/'+nextDay.day+'/'+current.start:'')+'">Открыть расписание</a></div></section>'+
-    attention(upcoming,latest,now)+'<div class="dashboard"><section class="panel"><header class="card-head"><div><h2>Сегодня</h2><p>'+date(data.today,{weekday:'long',day:'numeric',month:'long'})+'</p></div>'+scheduleLink+'</header>'+lessonRows(todayLessons)+'</section>'+
-    '<section class="panel sidecard"><header class="card-head"><span class="tile">'+icon('grades')+'</span><a class="text-link" href="#grades">К учёбе</a></header><h2>Ближайшая аттестация</h2>'+(upcoming?'<p><strong>'+escapeText(upcoming.name)+'</strong></p><p class="muted">'+escapeText(upcoming.form)+' · '+date(upcoming.date)+'</p>':'<p class="muted">Все дисциплины закрыты.</p>')+'</section>'+
+    '<section class="hero"><div class="orbit"></div><div class="hero-content"><span class="eyebrow">'+(current && nextDay.day===data.today && current.start<=now?'ПАРА СЕЙЧАС':'БЛИЖАЙШАЯ ПАРА')+'</span><h2>'+escapeText(current?.name || 'В расписании пока свободно')+'</h2>'+(current?'<div class="hero-meta"><span>'+icon('clock')+date(nextDay.day,{weekday:'short',day:'numeric',month:'short'})+' · '+current.start+'–'+current.end+'</span><span>'+icon('pin')+escapeText(current.room)+'</span></div>'+(current.change?'<p class="hero-change">'+escapeText(current.change)+' → '+escapeText(current.room)+'</p>':''):'')+'<a class="button light" href="#schedule'+(nextDay?'/'+nextDay.day+'/'+current.key:'')+'">Открыть расписание</a></div></section>'+
+    conflictPanel()+attention(upcoming,latest,now)+'<div class="dashboard"><section class="panel"><header class="card-head"><div><h2>Сегодня</h2><p>'+date(data.today,{weekday:'long',day:'numeric',month:'long'})+'</p></div>'+scheduleLink+'</header>'+lessonRows(todayLessons)+'</section>'+
+    prepCard()+
     '<section class="panel sidecard"><header class="card-head"><span class="tile">'+icon('requests')+'</span><a class="text-link" href="#requests">Все заявки</a></header><h2>Справки и заявления</h2>'+(latest?'<p><strong>'+escapeText(latest.title)+'</strong> <span class="chip good">'+escapeText(latest.status)+'</span></p>':'<p class="muted">Закажите справку или задайте вопрос деканату.</p>')+newRequest+'</section>'+
     '<section class="panel sidecard"><header class="card-head"><span class="tile">'+icon('notices')+'</span><a class="text-link" href="#notices">Все новости</a></header><h2>'+escapeText(data.notices.find(n=>!n.read)?.title || 'Все новости прочитаны')+'</h2><p class="muted">'+data.notices.filter(n=>!n.read).length+' из '+data.notices.length+' объявлений ожидают прочтения</p></section></div>';
 }
@@ -108,19 +141,22 @@ function schedule() {
   const valid = v=>data.schedule.some(d=>d.day===v);
   const prev = addDays(selected,-7), next=addDays(selected,7);
   const lessons = data.schedule.find(d=>d.day===selected)?.lessons || [];
-  return pageHeading('Расписание','Пары, аудитории и изменения на неделю.')+
+  return pageHeading('Расписание','Пары, аудитории и изменения на неделю.')+conflictPanel(selected)+
     '<section class="panel"><div class="card-head"><div><h2>'+date(days[0])+' — '+date(days[6])+'</h2><p>Учебная неделя</p></div><button class="button secondary" data-day="'+data.today+'">Сегодня</button></div><div class="week-controls"><button class="button secondary" data-day="'+prev+'" '+(valid(prev)?'':'disabled')+'>Предыдущая</button><button class="button secondary" data-day="'+next+'" '+(valid(next)?'':'disabled')+'>Следующая</button></div>'+
     '<div class="week" aria-label="Дни недели">'+days.map(v=>'<button class="weekday" data-day="'+v+'" aria-pressed="'+(v===selected)+'" '+(valid(v)?'':'disabled')+'><span>'+date(v,{weekday:'short'})+'</span><strong>'+Number(v.slice(-2))+'</strong>'+(v===data.today?'<span class="sr-only">Сегодня</span>':'')+'</button>').join('')+'</div><div class="day-heading"><h3>'+date(selected,{weekday:'long',day:'numeric',month:'long'})+'</h3><span>'+lessons.length+' в расписании</span></div>'+lessonRows(lessons,targetTime)+'</section>';
 }
 function grades() {
   const done=data.grades.filter(g=>g.grade).length;
   const [,selected]=location.hash.slice(1).split('/');
-  return pageHeading('Успеваемость','Оценки, зачёты и даты аттестации.')+
+  return pageHeading('Успеваемость','План подготовки, зачёты и даты аттестации.')+
     '<section class="panel progress-card"><div><span class="eyebrow">ТЕКУЩИЙ СЕМЕСТР</span><h2>Закрыто '+done+' из '+data.grades.length+'</h2></div><progress max="'+data.grades.length+'" value="'+done+'" aria-label="Закрытые дисциплины"></progress></section>'+
-    '<section class="panel"><header class="card-head"><h2>Дисциплины</h2></header><ul class="records grade-list">'+data.grades.map(g=>
+    '<section class="panel"><header class="card-head"><h2>Подготовка по дисциплинам</h2></header><ul class="records grade-list">'+data.grades.map(g=>
       '<li id="grade-'+g.id+'" tabindex="-1" class="'+(selected===g.id?'spotlight':'')+'"><div><strong>'+escapeText(g.name)+'</strong><small>'+escapeText(g.form)+(g.grade?'':' · '+date(g.date)+' · '+g.time+' · '+escapeText(g.room))+'</small>'+
-      (g.grade?'':'<a class="text-link" href="/api/calendar/'+g.id+'" download>В календарь</a>')+'</div><span class="chip '+(g.grade?'good':'neutral')+'">'+escapeText(g.grade || 'Предстоит')+'</span></li>'
-    ).join('')+'</ul></section>';
+      (g.grade?'':'<ul class="prep-steps">'+g.steps.map(step=>'<li>'+
+        (step.id?'<label><input type="checkbox" data-step="'+step.id+'" '+(data.checks.includes(step.id)?'checked':'')+'>'+escapeText(step.label)+'</label>':'<span>'+escapeText(step.label)+'</span>')+
+        '<small>'+date(step.date)+'</small></li>').join('')+'</ul><div class="toolbar"><a class="text-link" href="/api/calendar/'+g.id+'" download>В календарь</a><button class="button secondary" data-action="map" data-room="'+escapeText(g.room)+'">Схема корпуса</button></div>')+
+      '</div><span class="chip '+(g.grade?'good':'neutral')+'">'+escapeText(g.grade || 'Предстоит')+'</span></li>'
+    ).join('')+'</ul></section>'+consultation();
 }
 function requests() {
   const records=data.applications;
@@ -144,7 +180,7 @@ function demoScheduleForm() {
       '<option value="'+escapeText(group.value)+'">'+escapeText(group.label)+'</option>'
     ).join('')+'</select></label><label>Дата<input name="day" type="date" min="'+data.today+'" required></label>'+
     '<label>Начало<select name="start"><option>09:00</option><option>10:45</option><option>12:30</option></select></label>'+
-    '<label>Новая аудитория<input name="room" placeholder="Б–312" maxlength="7" required></label></div>'+
+    '<label>Новое время<input name="newStart" type="time"></label><label>Новая аудитория<input name="room" placeholder="Б–312" maxlength="7" required></label></div>'+
     '<p role="status" class="form-result"></p><button class="button primary">Опубликовать перенос</button></form></section>';
 }
 function staff() {
@@ -162,7 +198,7 @@ function render(focus=false) {
   const staffMode=page==='staff';
   const sections=staffMode ? {staff:'Очередь'} : nav;
   const links=Object.entries(sections).map(([key,label])=>'<a class="nav-item" href="#'+key+'" '+(key===page?'aria-current="page"':'')+'>'+icon(key==='staff'?'requests':key)+'<span>'+label+'</span>'+(key==='notices' && data.notices.some(n=>!n.read)?'<i class="unread" aria-label="Есть непрочитанные"></i>':'')+'</a>').join('');
-  app.innerHTML='<a class="skip" href="#main-content">К содержанию</a><div class="layout"><aside class="sidebar"><a class="brand-link" href="#home" aria-label="Декана, главная">'+brand+'</a><nav aria-label="Разделы кабинета">'+links+'</nav><div class="sidebar-note">Конкурсный концепт<br>Вымышленные данные</div></aside><div class="work"><header class="topbar"><a class="mobile-brand" href="#home">'+brand+'</a><span class="crumb">Личный кабинет <span>/</span> '+sections[page]+'</span>'+(staffMode?'':'<button class="button secondary help-button" data-action="help">Помощник</button>')+'<a class="top-profile" href="'+(staffMode?'#staff':'#profile')+'" aria-label="Открыть профиль"><span class="avatar">'+escapeText(data.profile.initials)+'</span><span><strong>'+escapeText(data.profile.first)+'</strong><small>'+escapeText(data.profile.group)+'</small></span></a></header><main id="main-content" class="content">'+pages[page]()+'<footer>Декана · конкурсный концепт · вымышленные данные</footer></main></div></div><nav class="mobile-nav" aria-label="Разделы кабинета">'+links+'</nav><p id="toast" class="toast" role="status"></p><dialog id="dialog" aria-labelledby="dialog-title"></dialog>';
+  app.innerHTML='<a class="skip" href="#main-content">К содержанию</a><div class="layout"><aside class="sidebar"><a class="brand-link" href="#home" aria-label="Декана, главная">'+brand+'</a><nav aria-label="Разделы кабинета">'+links+'</nav><div class="sidebar-note">Конкурсный концепт<br>Вымышленные данные</div></aside><div class="work"><header class="topbar"><a class="mobile-brand" href="#home">'+brand+'</a><span class="crumb">Личный кабинет <span>/</span> '+sections[page]+'</span>'+(staffMode?'':'<button class="button secondary help-button" data-action="help">Помощник</button>')+'<a class="top-profile" href="'+(staffMode?'#staff':'#profile')+'" aria-label="Открыть профиль"><span class="avatar">'+escapeText(data.profile.initials)+'</span><span><strong>'+escapeText(data.profile.first)+'</strong><small>'+escapeText(data.profile.group)+'</small></span></a></header><main id="main-content" class="content">'+(juryBar(staffMode))+pages[page]()+'<footer>Декана · конкурсный концепт · вымышленные данные</footer></main></div></div><nav class="mobile-nav" aria-label="Разделы кабинета">'+links+'</nav><p id="toast" class="toast" role="status"></p><dialog id="dialog" aria-labelledby="dialog-title"></dialog>';
   document.title=sections[page]+' · Декана';
   if (focus) document.querySelector('#page-title').focus();
 }

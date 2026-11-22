@@ -4,47 +4,105 @@ function timeline(result) {
     '<li><strong>'+escapeText(entry.label)+'</strong><small>'+date(entry.at,{day:'numeric',month:'long',hour:'2-digit',minute:'2-digit'})+'</small></li>'
   ).join('')+'</ol>';
 }
+function messageThread(result) {
+  if(!result.messages?.length) return '';
+  return '<section aria-label="Уточнения" class="thread">'+result.messages.map(entry=>
+    '<article><small>'+(entry.kind==='question'?'Деканат':'Студент')+' · '+date(entry.created,{day:'numeric',month:'long',hour:'2-digit',minute:'2-digit'})+'</small><p>'+
+    escapeText(entry.message)+'</p></article>'
+  ).join('')+'</section>';
+}
 function showDetail(result) {
   const dialog=document.querySelector('#dialog');
   dialog.innerHTML='<div class="dialog-head"><h2 id="dialog-title">'+escapeText(result.title)+'</h2>'+closeDialog+'</div>'+
-    '<p><span class="chip good">'+escapeText(result.status)+'</span></p>'+
-    timeline(result)+(result.note?'<p class="request-note">'+escapeText(result.note)+'</p>':'')+
+    '<p><span class="chip '+(result.awaitingStudent?'warn':'good')+'">'+escapeText(result.status)+'</span></p>'+
+    timeline(result)+(result.note?'<p class="request-note">'+escapeText(result.note)+'</p>':'')+messageThread(result)+
     (result.reply?'<p class="request-note"><strong>Ответ деканата</strong><br>'+escapeText(result.reply)+'</p>':'')+
-    (result.history.length<3?'<p class="muted">Ориентир по сроку: '+escapeText(result.time)+'.</p>':'')+
+    (result.awaitingStudent?'<form id="answer-form"><label for="student-reply">Уточнение для деканата</label><textarea id="student-reply" name="reply" rows="3" maxlength="500" required></textarea><p class="error" role="alert"></p><button class="button primary">Отправить уточнение</button></form>':'')+
+    (result.open?'<p class="muted">Ориентир по сроку: '+escapeText(result.time)+'.</p>':'')+
     '<div class="toolbar">'+(result.documentReady?'<a class="button primary" href="/api/applications/'+result.id+'/document" download>Скачать демо-PDF</a>':'')+
     '<button class="button secondary" data-action="refresh-detail">Обновить статус</button></div>';
   if(!dialog.open) dialog.showModal();
-}
-function staffDetail(record) {
-  const dialog=document.querySelector('#dialog');
-  const commands = record.history.length===1
-    ? '<button type="submit" class="button primary">Взять на рассмотрение</button>'
-    : (record.type==='request'?'<label for="staff-reply">Ответ студенту</label><textarea id="staff-reply" name="reply" rows="3" maxlength="500" required></textarea>':'')+
-      '<button type="submit" class="button primary">'+(record.type==='request'?'Отправить ответ':'Выдать демо-PDF')+'</button>';
-  dialog.innerHTML='<div class="dialog-head"><h2 id="dialog-title">'+escapeText(record.title)+'</h2>'+closeDialog+'</div>'+
-    '<p class="muted">'+escapeText(record.student)+'</p>'+timeline(record)+
-    (record.note?'<p class="request-note">'+escapeText(record.note)+'</p>':'')+
-    (record.reply?'<p class="request-note">'+escapeText(record.reply)+'</p>':'')+
-    (record.history.length<3?'<form><p class="error" role="alert"></p>'+commands+'</form>':'');
-  if(!dialog.open) dialog.showModal();
-  dialog.querySelector('form')?.addEventListener('submit',async event=>{
+  dialog.querySelector('#answer-form')?.addEventListener('submit',async event=>{
     event.preventDefault();
-    const form=event.currentTarget, button=form.querySelector('button[type=submit]');
+    const form=event.currentTarget, button=form.querySelector('button');
     button.disabled=true;
     try {
-      const payload={action:record.history.length===1?'start':'complete',reply:new FormData(form).get('reply') || ''};
-      const updated=await api('staff/applications/'+record.id,payload);
-      const position=data?.applications.findIndex(r=>r.id===record.id) ?? -1;
-      if(position<0 || !dialog.isConnected) return;
-      data.applications[position]=updated;
-      render();
-      staffDetail(updated);
+      await api('applications/'+result.id,Object.fromEntries(new FormData(form)));
+      await openDetail(result.id);
     } catch(e) {
       if(e.status===401) return login('Сессия закончилась. Войдите снова.');
       alertText(form.querySelector('.error'),e.message);
       button.disabled=false;
     }
   });
+}
+async function openStaffDetail(id) {
+  const currentNavigation=navigation;
+  try {
+    const record=await api('staff/applications/'+id);
+    if (navigation===currentNavigation && data?.role==='staff') staffDetail(record);
+  } catch (e) {
+    if(e.status===401) return login('Сессия закончилась. Войдите снова.');
+    alertText(document.querySelector('#toast'),e.message);
+  }
+}
+function staffDetail(record) {
+  const dialog=document.querySelector('#dialog');
+  const editForm=!record.open?'':record.awaitingStudent?'<p class="muted">Ожидается уточнение от студента.</p>':
+    '<form><p class="error" role="alert"></p>'+(!record.inProgress
+    ?'<button type="submit" value="start" class="button primary">Взять на рассмотрение</button>'
+    :'<label for="staff-reply">'+(record.type==='request'?'Ответ или вопрос студенту':'Текст уточнения, если нужен')+'</label><textarea id="staff-reply" name="reply" rows="3" maxlength="500"></textarea>'+
+      '<div class="toolbar"><button type="submit" value="question" class="button secondary">Запросить уточнение</button>'+
+      '<button type="submit" value="complete" class="button primary">'+(record.type==='request'?'Отправить ответ':'Выдать демо-PDF')+'</button></div>')+'</form>';
+  dialog.innerHTML='<div class="dialog-head"><h2 id="dialog-title">'+escapeText(record.title)+'</h2>'+closeDialog+'</div>'+
+    '<p class="muted">'+escapeText(record.student)+' · '+escapeText(record.status)+'</p>'+timeline(record)+
+    (record.note?'<p class="request-note">'+escapeText(record.note)+'</p>':'')+messageThread(record)+
+    (record.reply?'<p class="request-note">'+escapeText(record.reply)+'</p>':'')+editForm;
+  if(!dialog.open) dialog.showModal();
+  dialog.querySelector('form')?.addEventListener('submit',async event=>{
+    event.preventDefault();
+    const form=event.currentTarget;
+    const buttons=form.querySelectorAll('button[type=submit]');
+    const action=event.submitter?.value || (record.inProgress?'complete':'start');
+    for(const button of buttons) button.disabled=true;
+    try {
+      const payload={action,reply:new FormData(form).get('reply') || ''};
+      const updated=await api('staff/applications/'+record.id,payload);
+      const position=data?.applications.findIndex(r=>r.id===record.id) ?? -1;
+      if(position<0 || !dialog.isConnected) return;
+      data.applications[position]=updated;
+      const keepOpen=dialog.open;
+      render();
+      if(keepOpen) staffDetail(updated);
+    } catch(e) {
+      if(e.status===401) return login('Сессия закончилась. Войдите снова.');
+      alertText(form.querySelector('.error'),e.message);
+      for(const button of buttons) button.disabled=false;
+    }
+  });
+}
+function campusMap(value) {
+  const room=/^([БД])–([1-3][0-9]{2})$/.exec(value);
+  const dialog=document.querySelector('#dialog');
+  const floor=Number(room?.[2]?.[0]);
+  const known={
+    1:['Вход','Вахта',room?.[1]==='Д'?'108 / 110':'110'],
+    2:['Лестница','204','208'],
+    3:['Лестница','312','Зона ожидания'],
+  };
+  let directions='<p>Для этой аудитории подробной демосхемы нет. Уточните маршрут у стойки в корпусе.</p>';
+  if(room) {
+    const target=room[2];
+    const labels=known[floor];
+    const index=labels.findIndex(label=>label.split(' / ').includes(target));
+    const instruction=floor===1?'Войдите через главный вход и пройдите мимо вахты.':'От главного входа пройдите к лестнице и поднимитесь на '+floor+' этаж.';
+    const side=index===1?' Аудитория находится сразу у лестницы.':index===2?' Аудитория находится в конце коридора.':' Номера на этаже уточняйте по указателям.';
+    directions='<p>'+instruction+side+'</p><div class="map-floor" role="group" aria-label="Схема этажа">'+labels.map((label,n)=>
+      '<span'+(n===index?' class="map-target"':'')+'>'+escapeText(label)+'</span>'
+    ).join('')+'<span class="map-hall">Коридор</span></div><p class="muted">Схема демонстрационного корпуса.</p>';
+  }
+  dialog.innerHTML='<div class="dialog-head"><h2 id="dialog-title">Аудитория '+escapeText(value)+'</h2>'+closeDialog+'</div>'+directions;
+  dialog.showModal();
 }
 function help() {
   const dialog=document.querySelector('#dialog');
@@ -84,9 +142,9 @@ function help() {
   });
   dialog.showModal();
 }
-function newApplication(initial='') {
+function newApplication(initial='',prefill='') {
   const dialog=document.querySelector('#dialog');
-  dialog.innerHTML='<div class="dialog-head"><h2 id="dialog-title">Новая заявка</h2><button class="close" data-action="close" aria-label="Закрыть">×</button></div><form id="application-form"><label for="type">Что нужно</label><select id="type" name="type" required>'+Object.entries(data.types).map(([k,t])=>'<option value="'+k+'" '+(k===initial?'selected':'')+'>'+escapeText(t.title)+'</option>').join('')+'</select><p id="estimate" class="muted"></p><label for="note">Комментарий</label><textarea id="note" name="note" maxlength="500" rows="3" placeholder="Только вымышленные сведения"></textarea><p class="error" role="alert"></p><button class="button primary" type="submit">Отправить заявку</button></form>';
+  dialog.innerHTML='<div class="dialog-head"><h2 id="dialog-title">Новая заявка</h2><button class="close" data-action="close" aria-label="Закрыть">×</button></div><form id="application-form"><label for="type">Что нужно</label><select id="type" name="type" required>'+Object.entries(data.types).map(([k,t])=>'<option value="'+k+'" '+(k===initial?'selected':'')+'>'+escapeText(t.title)+'</option>').join('')+'</select><p id="estimate" class="muted"></p><label for="note">Комментарий</label><textarea id="note" name="note" maxlength="500" rows="3" placeholder="Только вымышленные сведения">'+escapeText(prefill)+'</textarea><p class="error" role="alert"></p><button class="button primary" type="submit">Отправить заявку</button></form>';
   dialog.showModal();
   const form=dialog.querySelector('form');
   function update() {
@@ -162,9 +220,32 @@ app.addEventListener('click',async event=>{
   const action=target.dataset.action;
   if(action==='retry' || action==='reload') return start();
   if(action==='help') return help();
-  if(action==='staff-detail') {
-    const record=data.applications.find(r=>r.id===target.dataset.id);
-    if(record) staffDetail(record);
+  if(action==='map') return campusMap(target.dataset.room);
+  if(action==='staff-detail') return openStaffDetail(target.dataset.id);
+  if(action==='conflict') {
+    const activeDay=location.hash.startsWith('#schedule') ? location.hash.split('/')[1] || day || data.today : null;
+    const conflict=data.conflicts.find(item=>!activeDay || item.day===activeDay);
+    if(conflict){
+      const {moved,other,day:conflictDay}=conflict;
+      return newApplication('request','Прошу помочь с пересечением занятий '+date(conflictDay)+': '+moved.name+' ('+moved.start+'–'+moved.end+', '+moved.room+') и '+other.name+' ('+other.start+'–'+other.end+', '+other.room+').');
+    }
+  }
+  if(action==='demo-start' || action==='demo-role' || action==='consult') {
+    target.disabled=true;
+    try {
+      if(action==='consult') await api('consultation',{slot:target.dataset.slot,action:target.dataset.kind});
+      else {
+        await api(action==='demo-start'?'demo/start':'demo/switch',{role:target.dataset.role});
+        day=null;
+        history.replaceState(null,'',location.pathname);
+        window.scrollTo(0,0);
+      }
+      await start();
+    } catch(e) {
+      const message=document.querySelector('#toast') || document.querySelector('.login .error');
+      alertText(message,e.message);
+      target.disabled=false;
+    }
     return;
   }
   if(action==='new') return newApplication(target.dataset.type);
@@ -213,5 +294,22 @@ app.addEventListener('submit',async event=>{
     result.textContent=e.message;
   } finally {
     button.disabled=false;
+  }
+});
+
+app.addEventListener('change',async event=>{
+  const checkbox=event.target;
+  const step=checkbox.dataset.step;
+  if(!step) return;
+  checkbox.disabled=true;
+  try {
+    await api('study/check',{step,done:checkbox.checked});
+    data.checks=data.checks.filter(id=>id!==step);
+    if(checkbox.checked) data.checks.push(step);
+  } catch(e) {
+    checkbox.checked=!checkbox.checked;
+    alertText(document.querySelector('#toast'),e.message);
+  } finally {
+    checkbox.disabled=false;
   }
 });
